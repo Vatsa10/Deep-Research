@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentscope.agent import ReActAgent
+from agentscope.formatter import OpenAIChatFormatter
 from agentscope.message import Msg
 from agentscope.tool import Toolkit
 
@@ -42,6 +43,7 @@ def create_searcher(
             name="Searcher",
             sys_prompt=sys_prompt,
             model=model,
+            formatter=OpenAIChatFormatter(),
             toolkit=toolkit,
             max_iters=3,
         )

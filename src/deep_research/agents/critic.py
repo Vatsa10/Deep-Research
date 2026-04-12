@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from agentscope.agent import AgentBase
+from agentscope.formatter import OpenAIChatFormatter
 from agentscope.message import Msg
 
 logger = logging.getLogger(__name__)
@@ -15,23 +16,19 @@ PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "critic.md"
 
 
 class CriticAgent(AgentBase):
-    """Reviews a synthesized report and outputs a structured critique.
-
-    Evaluates completeness, accuracy, and identifies knowledge gaps.
-    The critique drives the iteration loop — if is_complete is False,
-    the pipeline re-plans and searches for the identified gaps.
-    """
+    """Reviews a synthesized report and outputs a structured critique."""
 
     def __init__(self, model: object) -> None:
         super().__init__()
         self.name = "Critic"
         self.model = model
+        self._formatter = OpenAIChatFormatter()
         self._sys_prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     async def reply(self, msg: Msg | None = None) -> Msg:
         report = msg.content if msg else "No report provided."
 
-        prompt = [
+        messages = [
             Msg(name="system", content=self._sys_prompt, role="system"),
             Msg(
                 name="user",
@@ -44,10 +41,10 @@ class CriticAgent(AgentBase):
             ),
         ]
 
-        response = await self.model(prompt)
-        text = response.text if hasattr(response, "text") else str(response)
+        formatted = await self._formatter.format(messages)
+        response = await self.model(formatted)
+        text = response.content if isinstance(response.content, str) else str(response.content)
 
-        # Parse JSON critique
         try:
             if "```json" in text:
                 text_json = text.split("```json")[1].split("```")[0].strip()

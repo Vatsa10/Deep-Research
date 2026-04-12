@@ -7,13 +7,13 @@ import logging
 from pathlib import Path
 
 from agentscope.agent import AgentBase
+from agentscope.formatter import OpenAIChatFormatter
 from agentscope.message import Msg
 
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "planner.md"
 
-# Default values for new plan fields
 PLAN_DEFAULTS = {
     "query_type": "exploratory",
     "domain": "general",
@@ -35,20 +35,21 @@ class PlannerAgent(AgentBase):
         super().__init__()
         self.name = "Planner"
         self.model = model
+        self._formatter = OpenAIChatFormatter()
         self._sys_prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     async def reply(self, msg: Msg | None = None) -> Msg:
         query = msg.content if msg else ""
 
-        prompt = [
+        messages = [
             Msg(name="system", content=self._sys_prompt, role="system"),
             Msg(name="user", content=query, role="user"),
         ]
 
-        response = await self.model(prompt)
-        text = response.text if hasattr(response, "text") else str(response)
+        formatted = await self._formatter.format(messages)
+        response = await self.model(formatted)
+        text = response.content if isinstance(response.content, str) else str(response.content)
 
-        # Parse JSON from the response
         try:
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0].strip()
@@ -69,12 +70,10 @@ class PlannerAgent(AgentBase):
                 ],
             }
 
-        # Ensure all new fields have defaults
         for key, default in PLAN_DEFAULTS.items():
             if key not in plan:
                 plan[key] = default
 
-        # Normalize sub_questions
         normalized = []
         for sq in plan.get("sub_questions", []):
             if isinstance(sq, str):

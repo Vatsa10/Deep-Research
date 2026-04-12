@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentscope.agent import ReActAgent
+from agentscope.formatter import OpenAIChatFormatter
 from agentscope.tool import Toolkit
 
 from ..tools.web_reader import fetch_url
@@ -29,6 +30,7 @@ def create_reader(model: object) -> callable:
             name="Reader",
             sys_prompt=sys_prompt,
             model=model,
+            formatter=OpenAIChatFormatter(),
             toolkit=toolkit,
             max_iters=2,
         )

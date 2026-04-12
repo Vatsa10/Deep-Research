@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from agentscope.agent import AgentBase
+from agentscope.formatter import OpenAIChatFormatter
 from agentscope.message import Msg
 
 logger = logging.getLogger(__name__)
@@ -14,22 +15,19 @@ PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "synthesizer.md"
 
 
 class SynthesizerAgent(AgentBase):
-    """Merges findings from multiple reader agents into a structured report.
-
-    Takes a merged context message containing all reader outputs and
-    produces a comprehensive markdown research report.
-    """
+    """Merges findings from multiple reader agents into a structured report."""
 
     def __init__(self, model: object) -> None:
         super().__init__()
         self.name = "Synthesizer"
         self.model = model
+        self._formatter = OpenAIChatFormatter()
         self._sys_prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     async def reply(self, msg: Msg | None = None) -> Msg:
         context = msg.content if msg else "No findings provided."
 
-        prompt = [
+        messages = [
             Msg(name="system", content=self._sys_prompt, role="system"),
             Msg(
                 name="user",
@@ -42,8 +40,9 @@ class SynthesizerAgent(AgentBase):
             ),
         ]
 
-        response = await self.model(prompt)
-        text = response.text if hasattr(response, "text") else str(response)
+        formatted = await self._formatter.format(messages)
+        response = await self.model(formatted)
+        text = response.content if isinstance(response.content, str) else str(response.content)
 
         return Msg(
             name=self.name,
