@@ -40,7 +40,7 @@ def load_model_config() -> dict:
 def create_model(config: dict) -> OpenAIChatModel:
     return OpenAIChatModel(
         model_name=config["model_name"],
-        temperature=config.get("temperature", 0.3),
+        generate_kwargs={"temperature": config.get("temperature", 0.3)},
     )
 
 

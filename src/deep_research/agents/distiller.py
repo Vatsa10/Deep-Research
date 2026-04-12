@@ -21,7 +21,9 @@ class DistillerAgent(AgentBase):
     """
 
     def __init__(self, model: object) -> None:
-        super().__init__(name="Distiller", model=model)
+        super().__init__()
+        self.name = "Distiller"
+        self.model = model
         self._sys_prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     async def reply(self, msg: Msg | None = None) -> Msg:
