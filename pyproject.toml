@@ -1,6 +1,6 @@
 [project]
 name = "deep-research-service"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-agent deep research service powered by AgentScope with async DAG execution"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,6 +12,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
     "sse-starlette>=2.0.0",
+    "libsql-experimental>=0.0.68",
+    "qdrant-client>=1.12.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=4.0.0",
 ]
 
 [project.optional-dependencies]
