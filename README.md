@@ -76,7 +76,7 @@ The DAG engine was built from scratch because AgentScope's built-in pipelines (s
 
 ```bash
 # Clone and enter the project
-cd Agentscope
+cd Deep-Research
 
 # Create and activate a virtual environment
 python -m venv .venv
@@ -128,24 +128,20 @@ pytest
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Agent Framework | [AgentScope](https://github.com/agentscope-ai/agentscope) |
-| LLM | OpenAI (gpt-4o-mini for search/read, gpt-4o for synthesis/critique) |
-| Web Search | [Tavily](https://tavily.com/) |
-| Content Extraction | [trafilatura](https://github.com/adbar/trafilatura) |
-| DAG Execution | Python `graphlib.TopologicalSorter` + `asyncio` |
-| Backend | FastAPI + SSE |
-| Frontend | React + Vite + TypeScript |
+| Layer              | Technology                                                          |
+| ------------------ | ------------------------------------------------------------------- |
+| Agent Framework    | [AgentScope](https://github.com/agentscope-ai/agentscope)              |
+| LLM                | OpenAI (gpt-4o-mini for search/read, gpt-4o for synthesis/critique) |
+| Web Search         | [Tavily](https://tavily.com/)                                          |
+| Content Extraction | [trafilatura](https://github.com/adbar/trafilatura)                    |
+| DAG Execution      | Python `graphlib.TopologicalSorter` + `asyncio`                 |
+| Backend            | FastAPI + SSE                                                       |
+| Frontend           | React + Vite + TypeScript                                           |
 
 ## Cost Estimate
 
-| Depth | LLM Cost | Search Cost | Total |
-|---|---|---|---|
-| Quick | ~$0.05 | ~$0.025 | ~$0.08 |
-| Standard | ~$0.15 | ~$0.06 | ~$0.21 |
-| Deep | ~$0.35 | ~$0.10 | ~$0.45 |
-
-## License
-
-MIT
+| Depth    | LLM Cost         | Search Cost | Total |
+| -------- | ---------------- | ----------- | ----- |
+| Quick    | ~$0.05 | ~$0.025 | ~$0.08      |       |
+| Standard | ~$0.15 | ~$0.06  | ~$0.21      |       |
+| Deep     | ~$0.35 | ~$0.10  | ~$0.45      |       |

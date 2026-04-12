@@ -23,13 +23,6 @@ interface DAGViewProps {
   events: SSEEvent[];
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  pending: "#6b7280",
-  running: "#3b82f6",
-  completed: "#10b981",
-  failed: "#ef4444",
-};
-
 const AGENT_ICONS: Record<string, string> = {
   searcher: "S",
   reader: "R",
@@ -46,119 +39,91 @@ export default function DAGView({
 }: DAGViewProps) {
   if (!dagStructure && events.length === 0) return null;
 
-  // Group nodes by type for layout
-  const searchers = dagStructure?.nodes.filter((n) => n.type === "searcher") ?? [];
-  const readers = dagStructure?.nodes.filter((n) => n.type === "reader") ?? [];
-  const others = dagStructure?.nodes.filter(
-    (n) => n.type !== "searcher" && n.type !== "reader"
-  ) ?? [];
+  const searchers =
+    dagStructure?.nodes.filter((n) => n.type === "searcher") ?? [];
+  const readers =
+    dagStructure?.nodes.filter((n) => n.type === "reader") ?? [];
+  const synthesizer =
+    dagStructure?.nodes.filter((n) => n.type === "synthesizer") ?? [];
+  const critic =
+    dagStructure?.nodes.filter((n) => n.type === "critic") ?? [];
+
+  const renderNode = (node: DAGNode) => {
+    const status = nodeStatuses[node.id] || "pending";
+    return (
+      <div key={node.id} className={`dag-node ${status}`}>
+        <span className="node-icon">
+          {AGENT_ICONS[node.type] || "?"}
+        </span>
+        <span className="node-label" title={node.label}>
+          {node.label.length > 35
+            ? node.label.slice(0, 35) + "\u2026"
+            : node.label}
+        </span>
+      </div>
+    );
+  };
+
+  // Only show recent events
+  const recentEvents = events.filter(
+    (e) => e.type !== "keepalive"
+  ).slice(-6);
 
   return (
     <div className="dag-view">
       <div className="dag-header">
         <h2>Research DAG</h2>
         <span className="iteration-badge">
-          Iteration {iteration}/{maxIterations}
+          Pass {iteration}/{maxIterations}
         </span>
       </div>
 
       {dagStructure ? (
         <div className="dag-graph">
-          {/* Planner seed (always completed at this point) */}
+          {/* Planner (always done by this point) */}
           <div className="dag-layer">
-            <div
-              className="dag-node"
-              style={{ borderColor: "#10b981" }}
-            >
+            <div className="dag-node completed">
               <span className="node-icon">P</span>
               <span className="node-label">Planner</span>
             </div>
           </div>
 
-          {/* Searchers layer */}
           {searchers.length > 0 && (
-            <div className="dag-layer">
-              {searchers.map((node) => (
-                <div
-                  key={node.id}
-                  className={`dag-node ${nodeStatuses[node.id] || "pending"}`}
-                  style={{
-                    borderColor: STATUS_COLORS[nodeStatuses[node.id] || "pending"],
-                  }}
-                >
-                  <span className="node-icon">
-                    {AGENT_ICONS[node.type] || "?"}
-                  </span>
-                  <span className="node-label" title={node.label}>
-                    {node.label.length > 30
-                      ? node.label.slice(0, 30) + "..."
-                      : node.label}
-                  </span>
-                </div>
-              ))}
-            </div>
+            <div className="dag-layer">{searchers.map(renderNode)}</div>
           )}
 
-          {/* Readers layer */}
           {readers.length > 0 && (
-            <div className="dag-layer">
-              {readers.map((node) => (
-                <div
-                  key={node.id}
-                  className={`dag-node ${nodeStatuses[node.id] || "pending"}`}
-                  style={{
-                    borderColor: STATUS_COLORS[nodeStatuses[node.id] || "pending"],
-                  }}
-                >
-                  <span className="node-icon">
-                    {AGENT_ICONS[node.type] || "?"}
-                  </span>
-                  <span className="node-label" title={node.label}>
-                    {node.label.length > 30
-                      ? node.label.slice(0, 30) + "..."
-                      : node.label}
-                  </span>
-                </div>
-              ))}
-            </div>
+            <div className="dag-layer">{readers.map(renderNode)}</div>
           )}
 
-          {/* Synthesizer + Critic layer */}
-          {others.length > 0 && (
+          {(synthesizer.length > 0 || critic.length > 0) && (
             <div className="dag-layer">
-              {others.map((node) => (
-                <div
-                  key={node.id}
-                  className={`dag-node ${nodeStatuses[node.id] || "pending"}`}
-                  style={{
-                    borderColor: STATUS_COLORS[nodeStatuses[node.id] || "pending"],
-                  }}
-                >
-                  <span className="node-icon">
-                    {AGENT_ICONS[node.type] || "?"}
-                  </span>
-                  <span className="node-label">{node.label}</span>
-                </div>
-              ))}
+              {synthesizer.map(renderNode)}
+              {critic.map(renderNode)}
             </div>
           )}
         </div>
       ) : (
-        <div className="dag-loading">Preparing research plan...</div>
+        <div className="dag-loading">Preparing research plan</div>
       )}
 
-      {/* Event log */}
-      <div className="event-log">
-        {events.slice(-8).map((event, i) => (
-          <div key={i} className={`event-item event-${event.type}`}>
-            <span className="event-type">{event.type}</span>
-            <span className="event-msg">
-              {(event.agent as string) || (event.node_id as string) || ""}{" "}
-              {(event.message as string) || (event.summary as string) || ""}
-            </span>
-          </div>
-        ))}
-      </div>
+      {recentEvents.length > 0 && (
+        <div className="event-log">
+          {recentEvents.map((event, i) => (
+            <div key={i} className={`event-item event-${event.type}`}>
+              <span className="event-type">{event.type}</span>
+              <span className="event-msg">
+                {(event.agent as string) ||
+                  (event.node_id as string) ||
+                  ""}{" "}
+                {(event.message as string) ||
+                  (event.summary as string) ||
+                  ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

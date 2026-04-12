@@ -1,4 +1,3 @@
-import { useState } from "react";
 import QueryInput from "./components/QueryInput";
 import DAGView from "./components/DAGView";
 import ReportView from "./components/ReportView";
@@ -10,13 +9,15 @@ export default function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>Deep Research</h1>
+        <h1>
+          <span>Deep Research</span>
+        </h1>
         <p className="subtitle">
-          Multi-agent research with async DAG execution
+          Multi-agent research powered by async DAG execution
         </p>
       </header>
 
-      <main className="main">
+      <main>
         <QueryInput
           onSubmit={startResearch}
           isLoading={state.status === "running"}
@@ -24,6 +25,10 @@ export default function App() {
 
         {state.status !== "idle" && (
           <div className="results">
+            {state.error && (
+              <div className="error-banner">{state.error}</div>
+            )}
+
             <DAGView
               dagStructure={state.dagStructure}
               nodeStatuses={state.nodeStatuses}
