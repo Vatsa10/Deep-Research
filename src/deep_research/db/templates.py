@@ -58,6 +58,16 @@ BUILTIN_TEMPLATES = [
 def seed_builtin_templates() -> None:
     """Insert built-in templates if they don't exist."""
     db = get_db()
+
+    # Ensure the "system" user exists for built-in templates
+    system_user = db.execute("SELECT id FROM users WHERE id = 'system'").fetchone()
+    if not system_user:
+        db.execute(
+            "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
+            ("system", "system@internal", "nologin", "System"),
+        )
+        db.commit()
+
     for t in BUILTIN_TEMPLATES:
         existing = db.execute(
             "SELECT id FROM templates WHERE id = ?", (t["id"],)
