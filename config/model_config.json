@@ -1,0 +1,27 @@
+{
+    "planner": {
+        "model_type": "openai_chat",
+        "model_name": "gpt-4o-mini",
+        "temperature": 0.3
+    },
+    "searcher": {
+        "model_type": "openai_chat",
+        "model_name": "gpt-4o-mini",
+        "temperature": 0.1
+    },
+    "reader": {
+        "model_type": "openai_chat",
+        "model_name": "gpt-4o-mini",
+        "temperature": 0.1
+    },
+    "synthesizer": {
+        "model_type": "openai_chat",
+        "model_name": "gpt-4o",
+        "temperature": 0.4
+    },
+    "critic": {
+        "model_type": "openai_chat",
+        "model_name": "gpt-4o",
+        "temperature": 0.2
+    }
+}
