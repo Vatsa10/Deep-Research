@@ -1,10 +1,19 @@
-"""Content extraction from any URL — resilient, multi-strategy, auto-detecting."""
+"""Content extraction from any URL — multi-strategy, resilient, auto-detecting.
+
+Extraction chain (tries in order until one works):
+1. trafilatura's built-in fetcher (handles cookies, redirects, retries)
+2. httpx with browser headers
+3. Structured data from meta tags / JSON-LD
+4. Web archive (Wayback Machine) snapshot
+5. Specialized extractors (YouTube, PDF, GitHub)
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, parse_qs, urljoin
 
 import httpx
@@ -12,6 +21,8 @@ import trafilatura
 from agentscope.tool import ToolResponse
 
 logger = logging.getLogger(__name__)
+
+_executor = ThreadPoolExecutor(max_workers=4)
 
 _HEADERS = {
     "User-Agent": (
@@ -21,18 +32,16 @@ _HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",
 }
 
-# Cache to avoid re-fetching the same URL in a single session
 _cache: dict[str, dict] = {}
 
 
 async def fetch_url(url: str, max_words: int = 4000) -> ToolResponse:
     """Fetch and extract the main content from any URL.
 
-    Automatically handles web pages, PDFs, YouTube, GitHub, LinkedIn,
-    and other platforms. Retries with different strategies if blocked.
+    Tries multiple extraction strategies to handle blocked sites,
+    paywalls, login walls, and JS-rendered pages.
 
     Args:
         url: Any URL to extract content from.
@@ -49,7 +58,7 @@ async def fetch_url(url: str, max_words: int = 4000) -> ToolResponse:
     try:
         result = await _route_and_extract(url, max_words)
     except Exception as exc:
-        logger.warning("All extraction strategies failed for %s: %s", url, exc)
+        logger.warning("All strategies failed for %s: %s", url, exc)
         result = _error_result(url, str(exc))
 
     _cache[url] = result
@@ -57,24 +66,17 @@ async def fetch_url(url: str, max_words: int = 4000) -> ToolResponse:
 
 
 async def crawl_links(url: str, max_links: int = 10) -> ToolResponse:
-    """Extract all links from a page, useful for discovering related content.
-
-    Use this when you want to find related pages, sub-pages, or references
-    within a website you've already read.
+    """Extract all links from a page for discovering related content.
 
     Args:
         url: The page URL to extract links from.
         max_links: Maximum number of links to return.
 
     Returns:
-        JSON list of {text, url} for each link found on the page.
+        JSON list of {text, url} for each link found.
     """
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
-            resp = await client.get(url, headers=_HEADERS)
-            resp.raise_for_status()
-            html = resp.text
-
+        html = await _fetch_html(url)
         links = _extract_all_links(html, url)[:max_links]
         return ToolResponse(content=json.dumps(links, ensure_ascii=False))
     except Exception as exc:
@@ -87,48 +89,52 @@ async def crawl_links(url: str, max_links: int = 10) -> ToolResponse:
 
 
 async def _route_and_extract(url: str, max_words: int) -> dict:
-    """Route URL to the best extractor."""
     if _is_youtube(url):
         return await _extract_youtube(url, max_words)
     if _is_pdf(url):
         return await _extract_pdf(url, max_words)
     if _is_github(url):
         return await _extract_github(url, max_words)
-
-    # For everything else (including LinkedIn, Twitter, etc.):
-    # try multiple strategies in order
     return await _extract_with_fallbacks(url, max_words)
 
 
 async def _extract_with_fallbacks(url: str, max_words: int) -> dict:
-    """Try multiple extraction strategies — resilient to blocks and JS walls."""
+    """Try every extraction strategy in order until one works."""
 
-    # Strategy 1: Direct fetch + trafilatura (works for most sites)
+    # Strategy 1: trafilatura's own fetcher — it handles cookies,
+    # redirects, retries, and many anti-bot measures internally
+    try:
+        result = await _extract_via_trafilatura_fetcher(url, max_words)
+        if result["word_count"] > 50:
+            return result
+    except Exception as exc:
+        logger.debug("trafilatura fetcher failed for %s: %s", url, exc)
+
+    # Strategy 2: httpx with full browser headers
     try:
         result = await _extract_direct(url, max_words)
         if result["word_count"] > 50:
             return result
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Direct fetch failed for %s: %s", url, exc)
 
-    # Strategy 2: Try with different Accept header (some sites serve
-    # different content to different clients)
+    # Strategy 3: httpx with Safari user-agent (some sites treat Safari differently)
     try:
-        result = await _extract_direct(url, max_words, headers={
+        safari_headers = {
             **_HEADERS,
-            "Accept": "text/html",
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
             ),
-        })
+        }
+        result = await _extract_direct(url, max_words, headers=safari_headers)
         if result["word_count"] > 50:
             return result
     except Exception:
         pass
 
-    # Strategy 3: Meta tags / JSON-LD extraction (works for LinkedIn,
-    # Twitter cards, etc. even behind login walls)
+    # Strategy 4: Structured data (meta tags + JSON-LD) — works even
+    # behind login walls since sites expose these for social sharing
     try:
         result = await _extract_structured_data(url, max_words)
         if result["word_count"] > 20:
@@ -136,9 +142,9 @@ async def _extract_with_fallbacks(url: str, max_words: int) -> dict:
     except Exception:
         pass
 
-    # Strategy 4: Google cache (last resort for blocked pages)
+    # Strategy 5: Wayback Machine — if the page exists in the archive
     try:
-        result = await _extract_via_cache(url, max_words)
+        result = await _extract_via_wayback(url, max_words)
         if result["word_count"] > 50:
             return result
     except Exception:
@@ -150,8 +156,47 @@ async def _extract_with_fallbacks(url: str, max_words: int) -> dict:
 # ── Extractors ────────────────────────────────────────────────────────
 
 
+def _trafilatura_fetch_sync(url: str, max_words: int) -> dict:
+    """Use trafilatura's built-in fetcher (sync, runs in thread pool).
+
+    trafilatura.fetch_url handles:
+    - Cookies and sessions
+    - Retries with backoff
+    - Decompression
+    - Many anti-bot measures
+    """
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        return _error_result(url, "trafilatura fetch returned empty")
+
+    content = trafilatura.extract(
+        downloaded,
+        include_links=True,
+        include_tables=True,
+        output_format="txt",
+        favor_precision=True,
+    ) or ""
+
+    title = trafilatura.extract(downloaded, output_format="xmltei")
+    if title and "<title>" in title:
+        title = title.split("<title>")[1].split("</title>")[0].strip()
+    else:
+        # Fallback: extract from HTML directly
+        m = re.search(r"<title[^>]*>([^<]+)</title>", downloaded, re.IGNORECASE)
+        title = m.group(1).strip() if m else url
+
+    return _truncate(url, title, content, max_words, "web")
+
+
+async def _extract_via_trafilatura_fetcher(url: str, max_words: int) -> dict:
+    """Run trafilatura's fetcher in a thread pool (it's synchronous)."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, _trafilatura_fetch_sync, url, max_words)
+
+
 async def _extract_direct(url: str, max_words: int, headers: dict | None = None) -> dict:
-    """Direct HTTP fetch + trafilatura extraction."""
+    """Direct httpx fetch + trafilatura extraction."""
     async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
         resp = await client.get(url, headers=headers or _HEADERS)
         resp.raise_for_status()
@@ -167,10 +212,8 @@ async def _extract_direct(url: str, max_words: int, headers: dict | None = None)
 
 
 async def _extract_structured_data(url: str, max_words: int) -> dict:
-    """Extract from meta tags and JSON-LD — works even behind login walls."""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
-        resp = await client.get(url, headers=_HEADERS)
-        html = resp.text
+    """Extract from meta tags and JSON-LD — works behind login walls."""
+    html = await _fetch_html(url)
 
     title = (
         _extract_meta(html, "og:title")
@@ -186,15 +229,13 @@ async def _extract_structured_data(url: str, max_words: int) -> dict:
         or ""
     )
 
-    # JSON-LD often has richer content
-    json_ld = _extract_json_ld(html)
     content = description
+    json_ld = _extract_json_ld(html)
     if json_ld:
         for key in ("articleBody", "description", "text", "abstract"):
             if key in json_ld and len(str(json_ld[key])) > len(content):
                 content = str(json_ld[key])
 
-    # Also try trafilatura as supplement
     body = trafilatura.extract(html, output_format="txt") or ""
     if len(body) > len(content):
         content = body
@@ -202,26 +243,33 @@ async def _extract_structured_data(url: str, max_words: int) -> dict:
     return _truncate(url, title, content, max_words, "structured")
 
 
-async def _extract_via_cache(url: str, max_words: int) -> dict:
-    """Try to fetch a cached version of the page via Google Web Cache."""
-    cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
-    async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
-        resp = await client.get(cache_url, headers=_HEADERS)
+async def _extract_via_wayback(url: str, max_words: int) -> dict:
+    """Fetch from the Wayback Machine (Internet Archive)."""
+    api_url = f"https://archive.org/wayback/available?url={url}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(api_url)
         if resp.status_code != 200:
-            return _error_result(url, "Cache not available")
+            return _error_result(url, "Wayback API unavailable")
+
+        data = resp.json()
+        snapshot = data.get("archived_snapshots", {}).get("closest", {})
+        if not snapshot or not snapshot.get("available"):
+            return _error_result(url, "No Wayback snapshot available")
+
+        archive_url = snapshot["url"]
+        resp = await client.get(archive_url, headers=_HEADERS, follow_redirects=True)
+        resp.raise_for_status()
         html = resp.text
 
     content = trafilatura.extract(html, output_format="txt") or ""
     title = _extract_title(html, url)
-    return _truncate(url, f"[Cached] {title}", content, max_words, "cached")
+    return _truncate(url, f"[Archive] {title}", content, max_words, "archived")
 
 
 async def _extract_youtube(url: str, max_words: int) -> dict:
-    """Extract YouTube transcript."""
     video_id = _get_youtube_id(url)
     if not video_id:
         return _error_result(url, "Could not parse YouTube video ID")
-
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         api = YouTubeTranscriptApi()
@@ -236,50 +284,38 @@ async def _extract_youtube(url: str, max_words: int) -> dict:
 
 
 async def _extract_pdf(url: str, max_words: int) -> dict:
-    """Download and extract text from a PDF."""
     try:
         import pymupdf
     except ImportError:
         return _error_result(url, "pymupdf not installed")
-
     async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
         resp = await client.get(url, headers=_HEADERS)
         resp.raise_for_status()
-        pdf_bytes = resp.content
-
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=resp.content, filetype="pdf")
     title = doc.metadata.get("title", "") or url.split("/")[-1]
-    pages_text = [page.get_text() for page in doc]
+    pages = [page.get_text() for page in doc]
     doc.close()
-
-    return _truncate(url, title, "\n\n".join(pages_text), max_words, "pdf")
+    return _truncate(url, title, "\n\n".join(pages), max_words, "pdf")
 
 
 async def _extract_github(url: str, max_words: int) -> dict:
-    """Extract GitHub repo info + README, or specific file content."""
     parsed = urlparse(url)
     parts = [p for p in parsed.path.strip("/").split("/") if p]
-
     if len(parts) < 2:
-        return await _extract_direct(url, max_words)
+        return await _extract_via_trafilatura_fetcher(url, max_words)
 
     owner, repo = parts[0], parts[1]
-
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        # Specific file
         if len(parts) > 3 and parts[2] in ("blob", "tree"):
-            branch, file_path = parts[3], "/".join(parts[4:])
-            raw = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
-            resp = await client.get(raw, headers=_HEADERS)
+            branch, fp = parts[3], "/".join(parts[4:])
+            raw = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{fp}"
+            resp = await client.get(raw)
             if resp.status_code == 200:
-                return _truncate(url, f"{owner}/{repo}/{file_path}", resp.text, max_words, "github")
+                return _truncate(url, f"{owner}/{repo}/{fp}", resp.text, max_words, "github")
 
-        # Repo overview
         api = f"https://api.github.com/repos/{owner}/{repo}"
-        resp = await client.get(api, headers={**_HEADERS, "Accept": "application/vnd.github.v3+json"})
-
-        info = ""
-        title = f"{owner}/{repo}"
+        resp = await client.get(api, headers={"Accept": "application/vnd.github.v3+json"})
+        info, title = "", f"{owner}/{repo}"
         if resp.status_code == 200:
             d = resp.json()
             title = d.get("full_name", title)
@@ -291,17 +327,34 @@ async def _extract_github(url: str, max_words: int) -> dict:
                 f"Updated: {d.get('updated_at', '')}\n\n"
             )
 
-        # README
         for branch in ("main", "master"):
-            readme_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md"
-            resp = await client.get(readme_url)
-            if resp.status_code == 200:
-                return _truncate(url, title, info + resp.text, max_words, "github")
+            r = await client.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md")
+            if r.status_code == 200:
+                return _truncate(url, title, info + r.text, max_words, "github")
 
         return _truncate(url, title, info or "README not found", max_words, "github")
 
 
-# ── URL Detection ─────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────
+
+
+async def _fetch_html(url: str) -> str:
+    """Fetch raw HTML from a URL with browser headers."""
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
+        resp = await client.get(url, headers=_HEADERS)
+        return resp.text
+
+
+def _truncate(url: str, title: str, content: str, max_words: int, source_type: str) -> dict:
+    words = content.split()
+    wc = len(words)
+    if wc > max_words:
+        content = " ".join(words[:max_words]) + "\n\n[...truncated]"
+    return {"url": url, "title": title, "content": content, "word_count": min(wc, max_words), "source_type": source_type}
+
+
+def _error_result(url: str, msg: str) -> dict:
+    return {"url": url, "title": url, "content": msg, "word_count": 0, "source_type": "error"}
 
 
 def _is_youtube(url: str) -> bool:
@@ -315,21 +368,6 @@ def _is_pdf(url: str) -> bool:
 
 def _is_github(url: str) -> bool:
     return "github.com" in urlparse(url).netloc
-
-
-# ── Helpers ───────────────────────────────────────────────────────────
-
-
-def _truncate(url: str, title: str, content: str, max_words: int, source_type: str) -> dict:
-    words = content.split()
-    wc = len(words)
-    if wc > max_words:
-        content = " ".join(words[:max_words]) + "\n\n[...truncated]"
-    return {"url": url, "title": title, "content": content, "word_count": min(wc, max_words), "source_type": source_type}
-
-
-def _error_result(url: str, msg: str) -> dict:
-    return {"url": url, "title": url, "content": msg, "word_count": 0, "source_type": "error"}
 
 
 def _get_youtube_id(url: str) -> str | None:
@@ -389,15 +427,13 @@ def _extract_json_ld(html: str) -> dict | None:
 
 
 def _extract_all_links(html: str, base_url: str) -> list[dict]:
-    """Extract all <a> links from HTML, resolving relative URLs."""
-    links = []
-    seen = set()
+    links, seen = [], set()
     for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>([^<]*)</a>', html, re.IGNORECASE):
         href, text = m.group(1).strip(), m.group(2).strip()
         if not href or href.startswith(("#", "javascript:", "mailto:")):
             continue
-        full_url = urljoin(base_url, href)
-        if full_url not in seen:
-            seen.add(full_url)
-            links.append({"text": text or full_url, "url": full_url})
+        full = urljoin(base_url, href)
+        if full not in seen:
+            seen.add(full)
+            links.append({"text": text or full, "url": full})
     return links
