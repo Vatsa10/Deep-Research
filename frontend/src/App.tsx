@@ -1,10 +1,11 @@
 import QueryInput from "./components/QueryInput";
 import DAGView from "./components/DAGView";
 import ReportView from "./components/ReportView";
+import ReasoningView from "./components/ReasoningView";
 import { useResearch } from "./hooks/useResearch";
 
 export default function App() {
-  const { state, startResearch } = useResearch();
+  const { state, startResearch, exportResearch } = useResearch();
 
   return (
     <div className="app">
@@ -13,7 +14,8 @@ export default function App() {
           <span>Deep Research</span>
         </h1>
         <p className="subtitle">
-          Multi-agent research powered by async DAG execution
+          Multi-agent research with source credibility, fact-checking, and
+          transparent reasoning
         </p>
       </header>
 
@@ -37,7 +39,29 @@ export default function App() {
               events={state.events}
             />
 
-            {state.report && <ReportView report={state.report} />}
+            {state.report && (
+              <>
+                <ReportView report={state.report} />
+
+                <ReasoningView
+                  validation={state.validation}
+                  factCheck={state.factCheck}
+                  reasoningTrace={state.reasoningTrace}
+                />
+
+                {state.status === "completed" && (
+                  <div className="export-bar">
+                    <button
+                      className="export-btn"
+                      onClick={exportResearch}
+                      type="button"
+                    >
+                      Export Research Artifact
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </main>

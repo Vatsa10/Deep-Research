@@ -1,4 +1,4 @@
-"""Core research pipeline: connects planner → DAG builder → DAG executor → iteration loop."""
+"""Core research pipeline: validator → planner → DAG → fact-check → iteration loop."""
 
 from __future__ import annotations
 
@@ -10,18 +10,20 @@ from typing import Any, Callable
 from agentscope.message import Msg
 from agentscope.model import OpenAIChatModel
 
+from ..agents.validator import PremiseValidatorAgent
 from ..agents.planner import PlannerAgent
 from ..agents.searcher import create_searcher_factory
 from ..agents.reader import create_reader_factory
 from ..agents.synthesizer import create_synthesizer_factory
+from ..agents.distiller import create_distiller_factory
 from ..agents.critic import create_critic_factory
 from ..dag.engine import DAGPipeline
 from ..dag.builder import build_research_dag, get_dag_structure
 from ..dag.nodes import NodeStatus
+from ..tools.fact_checker import verify_all_citations
 
 logger = logging.getLogger(__name__)
 
-# Depth presets: (max_iterations, max_sub_questions, max_urls_per_question)
 DEPTH_PRESETS = {
     "quick": (1, 3, 3),
     "standard": (2, 5, 5),
@@ -30,14 +32,12 @@ DEPTH_PRESETS = {
 
 
 def load_model_config() -> dict:
-    """Load model configuration from config file."""
     config_path = Path(__file__).parent.parent.parent.parent / "config" / "model_config.json"
     with open(config_path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def create_model(config: dict) -> OpenAIChatModel:
-    """Create an OpenAI chat model from config."""
     return OpenAIChatModel(
         model_name=config["model_name"],
         temperature=config.get("temperature", 0.3),
@@ -49,16 +49,14 @@ async def run_research(
     depth: str = "standard",
     on_progress: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute the full research pipeline.
+    """Execute the full research pipeline with all deficiency fixes.
 
-    Args:
-        query: The user's research query.
-        depth: Research depth — "quick", "standard", or "deep".
-        on_progress: Optional async callback for SSE progress events.
-            Signature: (event_type: str, data: dict) -> None
-
-    Returns:
-        Dict with keys: report, sources, iterations, dag_trace.
+    Pipeline stages:
+    1. Premise validation (reject nonsense, classify query)
+    2. Intent-aware planning (deep decomposition)
+    3. DAG execution (parallel search → read → synthesize → distill → critique)
+    4. Fact-checking (citation verification, unsupported claim detection)
+    5. Iteration loop (critic-driven refinement)
     """
     max_iterations, max_sub_questions, max_urls = DEPTH_PRESETS.get(
         depth, DEPTH_PRESETS["standard"]
@@ -71,92 +69,108 @@ async def run_research(
     synthesizer_model = create_model(model_config["synthesizer"])
     critic_model = create_model(model_config["critic"])
 
-    # Agent factories for the DAG builder
     searcher_factory = create_searcher_factory(searcher_model)
     reader_factory = create_reader_factory(reader_model)
     synthesizer_factory = create_synthesizer_factory(synthesizer_model)
+    distiller_factory = create_distiller_factory(synthesizer_model)
     critic_factory = create_critic_factory(critic_model)
 
     async def emit(event_type: str, data: dict) -> None:
         if on_progress:
             await on_progress(event_type, data)
 
-    # Initialize planner
+    # ── Stage 0: Premise Validation ──────────────────────────────────
+
+    await emit("status", {"agent": "Validator", "message": "Checking query premise..."})
+
+    validator = PremiseValidatorAgent(model=planner_model)
+    validation_msg = await validator(Msg(name="user", content=query, role="user"))
+    validation = validation_msg.metadata.get("validation", {})
+
+    premise_warning = ""
+    effective_query = query
+
+    if not validation.get("is_valid", True):
+        await emit("validation", {
+            "is_valid": False,
+            "concerns": validation.get("concerns", []),
+        })
+        # Still proceed but with warning
+        premise_warning = validation.get("warning", "The premise of this query may be flawed.")
+
+    if validation.get("rewritten_query"):
+        effective_query = validation["rewritten_query"]
+        await emit("status", {
+            "agent": "Validator",
+            "message": f"Query rewritten: {effective_query[:100]}",
+        })
+
+    # ── Stage 1+: Planning and DAG Execution Loop ────────────────────
+
     planner = PlannerAgent(model=planner_model)
     final_report = ""
+    distilled_summary = ""
     all_sources: list[dict] = []
+    reasoning_trace: list[dict] = []
+    fact_check_result: dict = {}
     iteration = 0
+    gaps: list[str] = []
 
     for iteration in range(1, max_iterations + 1):
         await emit("iteration_start", {"iteration": iteration, "max": max_iterations})
 
-        # Stage 1: Plan
-        await emit("status", {"agent": "Planner", "message": "Decomposing query..."})
+        # ── Planning ──
+        await emit("status", {"agent": "Planner", "message": "Analyzing intent and decomposing query..."})
 
         if iteration == 1:
-            plan_msg = await planner(Msg(name="user", content=query, role="user"))
+            plan_input = effective_query
+            if premise_warning:
+                plan_input = f"{effective_query}\n\n[VALIDATOR WARNING: {premise_warning}]"
+            plan_msg = await planner(Msg(name="user", content=plan_input, role="user"))
         else:
-            # Re-plan with gaps from the critic
             gap_context = (
-                f"Original query: {query}\n\n"
+                f"Original query: {effective_query}\n\n"
                 f"Previous research gaps to address:\n"
                 + "\n".join(f"- {g}" for g in gaps)
             )
-            plan_msg = await planner(
-                Msg(name="user", content=gap_context, role="user")
-            )
+            plan_msg = await planner(Msg(name="user", content=gap_context, role="user"))
 
         plan = plan_msg.metadata.get("plan", {})
-        sub_questions_raw = plan.get("sub_questions", [])
 
-        # Normalize sub_questions
-        sub_questions: list[str] = []
-        for sq in sub_questions_raw[:max_sub_questions]:
-            if isinstance(sq, dict):
-                sub_questions.append(sq.get("question", str(sq)))
-            else:
-                sub_questions.append(str(sq))
+        # Trim sub-questions to depth limit
+        plan["sub_questions"] = plan.get("sub_questions", [])[:max_sub_questions]
 
-        # Inject sub_questions as strings into the plan for the DAG builder
-        plan["sub_questions"] = sub_questions
+        reasoning_trace.append({
+            "agent": "Planner",
+            "action": "decomposed query",
+            "output_summary": f"{len(plan['sub_questions'])} sub-questions, type={plan.get('query_type')}, domain={plan.get('domain')}",
+            "decisions": [f"Query type: {plan.get('query_type')}", f"Domain: {plan.get('domain')}"],
+        })
 
-        await emit(
-            "status",
-            {
-                "agent": "Planner",
-                "message": f"Created plan with {len(sub_questions)} sub-questions",
-            },
-        )
+        await emit("status", {
+            "agent": "Planner",
+            "message": f"Plan: {len(plan['sub_questions'])} sub-questions ({plan.get('query_type', '?')} / {plan.get('domain', '?')})",
+        })
 
-        # Stage 2: Build and execute the DAG
+        # ── Build and Execute DAG ──
         dag_nodes = build_research_dag(
             plan=plan,
             searcher_factory=searcher_factory,
             reader_factory=reader_factory,
             synthesizer_factory=synthesizer_factory,
+            distiller_factory=distiller_factory,
             critic_factory=critic_factory,
         )
 
-        # Send DAG structure to frontend
         dag_structure = get_dag_structure(dag_nodes)
-        await emit("dag_init", {
-            "structure": dag_structure,
-            "iteration": iteration,
-        })
+        await emit("dag_init", {"structure": dag_structure, "iteration": iteration})
 
-        # DAG progress callback
-        async def dag_progress(
-            node_id: str, status: NodeStatus, data: Any = None
-        ) -> None:
+        async def dag_progress(node_id: str, status: NodeStatus, data: Any = None) -> None:
             summary = ""
             if data and hasattr(data, "content"):
                 summary = str(data.content)[:200]
-            await emit(
-                f"node_{status.value}",
-                {"node_id": node_id, "summary": summary},
-            )
+            await emit(f"node_{status.value}", {"node_id": node_id, "summary": summary})
 
-        # Execute the DAG
         pipeline = DAGPipeline(
             on_progress=dag_progress,
             max_concurrency=max_urls,
@@ -166,28 +180,57 @@ async def run_research(
         seed_results = {"planner": plan_msg}
         dag_result = await pipeline.run(dag_nodes, seed_results)
 
-        # Extract results
+        # ── Extract Results ──
         synthesizer_output = dag_result.outputs.get("synthesizer")
+        distiller_output = dag_result.outputs.get("distiller")
         critic_output = dag_result.outputs.get("critic")
 
         if synthesizer_output:
-            final_report = (
-                synthesizer_output.content
-                if hasattr(synthesizer_output, "content")
-                else str(synthesizer_output)
-            )
+            report_text = synthesizer_output.content if hasattr(synthesizer_output, "content") else str(synthesizer_output)
+            # Prepend premise warning if present
+            if premise_warning and iteration == 1:
+                final_report = f"> **Warning:** {premise_warning}\n\n{report_text}"
+            else:
+                final_report = report_text
 
-        # Check critic's verdict
+        if distiller_output:
+            distilled_summary = distiller_output.content if hasattr(distiller_output, "content") else str(distiller_output)
+
+        # ── Fact-Checking (citation verification) ──
+        await emit("status", {"agent": "FactChecker", "message": "Verifying citations..."})
+        try:
+            fact_check_result = await verify_all_citations(final_report)
+            await emit("fact_check", {
+                "total": fact_check_result.get("total", 0),
+                "verified": fact_check_result.get("verified", 0),
+                "dead": fact_check_result.get("dead", 0),
+            })
+        except Exception as exc:
+            logger.warning("Fact-check failed: %s", exc)
+            fact_check_result = {"total": 0, "verified": 0, "dead": 0, "details": []}
+
+        # ── Critic Verdict ──
         if critic_output and hasattr(critic_output, "metadata"):
             critique = critic_output.metadata.get("critique", {})
             is_complete = critique.get("is_complete", True)
             score = critique.get("completeness_score", 10)
             gaps = critique.get("gaps", [])
 
+            reasoning_trace.append({
+                "agent": "Critic",
+                "action": "reviewed report",
+                "output_summary": f"Score: {score}/10, complete: {is_complete}",
+                "decisions": [
+                    f"Gaps: {gaps}" if gaps else "No gaps",
+                    f"Hallucination concerns: {critique.get('hallucination_concerns', [])}",
+                ],
+            })
+
             await emit("critique", {
                 "score": score,
                 "is_complete": is_complete,
                 "gaps": gaps,
+                "hallucination_concerns": critique.get("hallucination_concerns", []),
                 "iteration": iteration,
             })
 
@@ -196,15 +239,21 @@ async def run_research(
         else:
             break
 
+    # ── Final Output ──
     await emit("done", {
         "report": final_report,
+        "distilled": distilled_summary,
         "iterations": iteration,
     })
 
     return {
         "report": final_report,
+        "distilled_summary": distilled_summary,
         "sources": all_sources,
         "iterations": iteration,
+        "validation": validation,
+        "fact_check": fact_check_result,
+        "reasoning_trace": reasoning_trace,
         "dag_trace": {
             "execution_order": dag_result.execution_order,
             "durations": dag_result.node_durations,

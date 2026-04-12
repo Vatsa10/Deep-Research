@@ -1,4 +1,4 @@
-"""PlannerAgent: Decomposes research queries into sub-questions."""
+"""PlannerAgent: Deep intent analysis and query decomposition."""
 
 from __future__ import annotations
 
@@ -13,11 +13,22 @@ logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "planner.md"
 
+# Default values for new plan fields
+PLAN_DEFAULTS = {
+    "query_type": "exploratory",
+    "domain": "general",
+    "temporal_scope": "",
+    "expertise_level": "intermediate",
+    "implicit_constraints": [],
+    "success_criteria": "",
+    "search_strategy": "",
+}
+
 
 class PlannerAgent(AgentBase):
-    """Decomposes a user's research query into structured sub-questions.
+    """Analyzes user intent and decomposes queries into structured sub-questions.
 
-    Outputs a ResearchPlan as JSON in Msg.metadata["plan"].
+    Outputs a ResearchPlan with intent metadata in Msg.metadata["plan"].
     """
 
     def __init__(self, model: object) -> None:
@@ -37,7 +48,6 @@ class PlannerAgent(AgentBase):
 
         # Parse JSON from the response
         try:
-            # Handle markdown code blocks
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0].strip()
             elif "```" in text:
@@ -52,19 +62,31 @@ class PlannerAgent(AgentBase):
                         "question": query,
                         "keywords": query.split()[:6],
                         "priority": 1,
+                        "needs_academic": False,
                     }
                 ],
-                "search_strategy": "Direct search for the main query",
             }
 
-        # Ensure sub_questions is a list of dicts with required fields
+        # Ensure all new fields have defaults
+        for key, default in PLAN_DEFAULTS.items():
+            if key not in plan:
+                plan[key] = default
+
+        # Normalize sub_questions
+        normalized = []
         for sq in plan.get("sub_questions", []):
             if isinstance(sq, str):
-                sq = {"question": sq, "keywords": [], "priority": 1}
+                sq = {"question": sq, "keywords": [], "priority": 1, "needs_academic": False}
+            elif isinstance(sq, dict):
+                sq.setdefault("needs_academic", False)
+                sq.setdefault("keywords", [])
+                sq.setdefault("priority", 1)
+            normalized.append(sq)
+        plan["sub_questions"] = normalized
 
         return Msg(
             name=self.name,
-            content=f"Research plan with {len(plan.get('sub_questions', []))} sub-questions",
+            content=f"Research plan with {len(normalized)} sub-questions ({plan.get('query_type', 'exploratory')} query in {plan.get('domain', 'general')} domain)",
             role="assistant",
             metadata={"plan": plan},
         )

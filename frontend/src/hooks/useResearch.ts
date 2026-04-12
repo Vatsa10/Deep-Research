@@ -10,6 +10,12 @@ interface SSEEvent {
   [key: string]: unknown;
 }
 
+interface FactCheck {
+  total: number;
+  verified: number;
+  dead: number;
+}
+
 interface ResearchState {
   status: "idle" | "running" | "completed" | "error";
   sessionId: string | null;
@@ -17,9 +23,14 @@ interface ResearchState {
   nodeStatuses: Record<string, string>;
   events: SSEEvent[];
   report: string | null;
+  distilled: string | null;
   iteration: number;
   maxIterations: number;
   error: string | null;
+  // New: deficiency-fix state
+  validation: Record<string, unknown> | null;
+  factCheck: FactCheck | null;
+  reasoningTrace: { agent: string; action: string; output_summary: string; decisions: string[] }[];
 }
 
 const INITIAL_STATE: ResearchState = {
@@ -29,9 +40,13 @@ const INITIAL_STATE: ResearchState = {
   nodeStatuses: {},
   events: [],
   report: null,
+  distilled: null,
   iteration: 1,
   maxIterations: 3,
   error: null,
+  validation: null,
+  factCheck: null,
+  reasoningTrace: [],
 };
 
 export function useResearch() {
@@ -41,7 +56,6 @@ export function useResearch() {
     setState({ ...INITIAL_STATE, status: "running" });
 
     try {
-      // Start the research
       const res = await fetch("/api/research", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -55,7 +69,6 @@ export function useResearch() {
       const { session_id } = await res.json();
       setState((prev) => ({ ...prev, sessionId: session_id }));
 
-      // Connect SSE
       const evtSource = new EventSource(
         `/api/research/${session_id}/stream`
       );
@@ -71,7 +84,6 @@ export function useResearch() {
             case "dag_init":
               newState.dagStructure = data.structure as DAGStructure;
               newState.iteration = (data.iteration as number) || 1;
-              // Reset node statuses for new iteration
               newState.nodeStatuses = {};
               break;
 
@@ -101,13 +113,29 @@ export function useResearch() {
               newState.maxIterations = (data.max as number) || 3;
               break;
 
+            case "validation":
+              newState.validation = data as Record<string, unknown>;
+              break;
+
+            case "fact_check":
+              newState.factCheck = {
+                total: (data.total as number) || 0,
+                verified: (data.verified as number) || 0,
+                dead: (data.dead as number) || 0,
+              };
+              break;
+
             case "critique":
-              // Critique received
               break;
 
             case "done":
               newState.status = "completed";
               newState.report = (data.report as string) || null;
+              newState.distilled = (data.distilled as string) || null;
+              // Fetch full result with reasoning trace
+              if (prev.sessionId) {
+                fetchReasoningTrace(prev.sessionId, setState);
+              }
               break;
 
             case "error":
@@ -144,5 +172,37 @@ export function useResearch() {
     }
   }, []);
 
-  return { state, startResearch };
+  const exportResearch = useCallback(async () => {
+    if (!state.sessionId) return;
+    window.open(`/api/research/${state.sessionId}/export`, "_blank");
+  }, [state.sessionId]);
+
+  return { state, startResearch, exportResearch };
+}
+
+/** Fetch reasoning trace after research completes */
+async function fetchReasoningTrace(
+  sessionId: string,
+  setState: React.Dispatch<React.SetStateAction<ResearchState>>
+) {
+  try {
+    const res = await fetch(`/api/research/${sessionId}/trace`);
+    if (res.ok) {
+      const data = await res.json();
+      setState((prev) => ({
+        ...prev,
+        validation: data.validation || prev.validation,
+        reasoningTrace: data.reasoning_trace || [],
+        factCheck: data.fact_check
+          ? {
+              total: data.fact_check.total || 0,
+              verified: data.fact_check.verified || 0,
+              dead: data.fact_check.dead || 0,
+            }
+          : prev.factCheck,
+      }));
+    }
+  } catch {
+    // Non-critical — trace is supplementary
+  }
 }
