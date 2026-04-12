@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import trafilatura
+from agentscope.tool import ToolResponse
 
 
-async def fetch_url(url: str, max_words: int = 4000) -> dict:
+async def fetch_url(url: str, max_words: int = 4000) -> ToolResponse:
     """Fetch and extract the main text content from a URL.
 
     Uses trafilatura for clean article extraction, stripping
@@ -17,7 +20,7 @@ async def fetch_url(url: str, max_words: int = 4000) -> dict:
         max_words: Maximum words to return (truncates beyond this).
 
     Returns:
-        Dict with keys: url, title, content, word_count.
+        ToolResponse with JSON string containing url, title, content, word_count.
     """
     headers = {
         "User-Agent": (
@@ -54,9 +57,11 @@ async def fetch_url(url: str, max_words: int = 4000) -> dict:
     if word_count > max_words:
         content = " ".join(words[:max_words]) + "\n\n[...truncated]"
 
-    return {
+    result = {
         "url": url,
         "title": title,
         "content": content,
         "word_count": min(word_count, max_words),
     }
+
+    return ToolResponse(content=json.dumps(result, ensure_ascii=False))

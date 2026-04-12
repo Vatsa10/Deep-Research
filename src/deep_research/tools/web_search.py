@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import httpx
+from agentscope.tool import ToolResponse
 
 
-async def web_search(query: str, max_results: int = 5) -> list[dict]:
+async def web_search(query: str, max_results: int = 5) -> ToolResponse:
     """Search the web using Tavily API.
 
     Args:
@@ -15,11 +17,11 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
         max_results: Maximum number of results to return.
 
     Returns:
-        List of dicts with keys: title, url, content, score.
+        ToolResponse with JSON string of results (title, url, content, score).
     """
     api_key = os.environ.get("TAVILY_API_KEY", "")
     if not api_key:
-        return [{"error": "TAVILY_API_KEY not set"}]
+        return ToolResponse(content="Error: TAVILY_API_KEY not set")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
@@ -35,7 +37,7 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
         resp.raise_for_status()
         data = resp.json()
 
-    return [
+    results = [
         {
             "title": r.get("title", ""),
             "url": r.get("url", ""),
@@ -44,3 +46,5 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
         }
         for r in data.get("results", [])
     ]
+
+    return ToolResponse(content=json.dumps(results, ensure_ascii=False))

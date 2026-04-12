@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
+from agentscope.tool import ToolResponse
 
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1"
 FIELDS = "title,abstract,citationCount,year,authors,openAccessPdf,externalIds,venue"
@@ -12,7 +15,7 @@ async def academic_search(
     query: str,
     max_results: int = 5,
     year_range: str = "",
-) -> list[dict]:
+) -> ToolResponse:
     """Search Semantic Scholar for academic papers.
 
     Free API, no auth needed. 200M+ papers indexed.
@@ -23,8 +26,7 @@ async def academic_search(
         year_range: Optional year filter, e.g. "2023-2026".
 
     Returns:
-        List of dicts with: title, abstract, url, authors, year,
-        citation_count, doi, open_access_url, venue.
+        ToolResponse with JSON string of papers (title, abstract, url, authors, etc.).
     """
     params = {
         "query": query,
@@ -53,7 +55,7 @@ async def academic_search(
             "title": paper.get("title", ""),
             "abstract": (paper.get("abstract") or "")[:500],
             "url": f"https://api.semanticscholar.org/CorpusID:{paper.get('corpusId', '')}",
-            "authors": authors[:5],  # top 5 authors
+            "authors": authors[:5],
             "year": paper.get("year"),
             "citation_count": paper.get("citationCount", 0),
             "doi": doi,
@@ -63,6 +65,6 @@ async def academic_search(
             "is_peer_reviewed": bool(paper.get("venue")),
         })
 
-    # Sort by citation count (most cited first)
     results.sort(key=lambda x: x["citation_count"], reverse=True)
-    return results
+
+    return ToolResponse(content=json.dumps(results, ensure_ascii=False))
