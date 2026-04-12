@@ -24,6 +24,7 @@ interface DAGInlineProps {
 }
 
 const ICONS: Record<string, string> = {
+  web_agent: "W",
   searcher: "S",
   reader: "R",
   synthesizer: "Y",
@@ -40,6 +41,7 @@ export default function DAGInline({
 }: DAGInlineProps) {
   if (!dagStructure && events.length === 0) return null;
 
+  const webAgents = dagStructure?.nodes.filter((n) => n.type === "web_agent") ?? [];
   const searchers = dagStructure?.nodes.filter((n) => n.type === "searcher") ?? [];
   const readers = dagStructure?.nodes.filter((n) => n.type === "reader") ?? [];
   const others = dagStructure?.nodes.filter(
@@ -75,6 +77,7 @@ export default function DAGInline({
               <span className="node-label">Planner</span>
             </div>
           </div>
+          {webAgents.length > 0 && <div className="dag-layer">{webAgents.map(renderNode)}</div>}
           {searchers.length > 0 && <div className="dag-layer">{searchers.map(renderNode)}</div>}
           {readers.length > 0 && <div className="dag-layer">{readers.map(renderNode)}</div>}
           {others.length > 0 && <div className="dag-layer">{others.map(renderNode)}</div>}

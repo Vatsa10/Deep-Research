@@ -11,8 +11,7 @@ from .nodes import DAGNode
 
 def build_research_dag(
     plan: dict[str, Any],
-    searcher_factory: Any,
-    reader_factory: Any,
+    web_agent_factory: Any,
     synthesizer_factory: Any,
     distiller_factory: Any | None,
     critic_factory: Any,
@@ -20,32 +19,31 @@ def build_research_dag(
 ) -> list[DAGNode]:
     """Construct a DAG of agent nodes from a research plan.
 
-    Updated DAG shape:
+    DAG shape (using unified WebAgent):
 
-        planner (seed) ─┬─→ searcher_0 → reader_0 ─┐
-                        ├─→ searcher_1 → reader_1 ─┼─→ synthesizer → distiller → critic
-                        └─→ searcher_N → reader_N ─┘
+        planner (seed) ─┬─→ web_agent_0 ─┐
+                        ├─→ web_agent_1 ─┼─→ synthesizer → [distiller] → critic
+                        └─→ web_agent_N ─┘
 
-    Searchers for sub-questions marked needs_academic=True will get
-    academic_search registered alongside web_search.
+    Each WebAgent autonomously searches + reads + extracts for its
+    sub-question. No separate searcher/reader nodes needed.
 
     Args:
         plan: Dict with "sub_questions" list from the PlannerAgent.
-        searcher_factory: Callable(sub_question, needs_academic) -> agent factory.
-        reader_factory: Callable() -> agent factory.
+        web_agent_factory: Callable(sub_question, needs_academic) -> agent factory.
         synthesizer_factory: Callable() -> agent factory.
-        distiller_factory: Callable() -> agent factory.
+        distiller_factory: Callable() -> agent factory or None.
         critic_factory: Callable() -> agent factory.
+        include_distiller: Whether to include the distiller node.
 
     Returns:
         List of DAGNode objects ready for DAGPipeline.run().
     """
     nodes: list[DAGNode] = []
     sub_questions_raw = plan.get("sub_questions", [])
-    reader_ids: list[str] = []
+    agent_ids: list[str] = []
 
     for i, sq in enumerate(sub_questions_raw):
-        # Handle both dict and string sub-questions
         if isinstance(sq, dict):
             question = sq.get("question", str(sq))
             needs_academic = sq.get("needs_academic", False)
@@ -53,51 +51,41 @@ def build_research_dag(
             question = str(sq)
             needs_academic = False
 
-        searcher_id = f"searcher_{i}"
-        reader_id = f"reader_{i}"
-        reader_ids.append(reader_id)
+        agent_id = f"web_agent_{i}"
+        agent_ids.append(agent_id)
 
-        # Searcher node: depends on planner (seed result)
         nodes.append(
             DAGNode(
-                id=searcher_id,
-                agent_factory=searcher_factory(question, needs_academic=needs_academic),
+                id=agent_id,
+                agent_factory=web_agent_factory(question, needs_academic=needs_academic),
                 depends_on=["planner"],
                 transform=lambda upstream, q=question: Msg(
                     name="user",
-                    content=f"Search for: {q}",
+                    content=(
+                        f"Research this sub-question thoroughly:\n\n{q}\n\n"
+                        "Search the web, read the most relevant sources, "
+                        "and provide a structured summary with citations."
+                    ),
                     role="user",
                 ),
-                label=f"Search: {question[:50]}",
-                agent_type="searcher",
+                label=f"Research: {question[:45]}",
+                agent_type="web_agent",
             )
         )
 
-        # Reader node: depends on its searcher
-        nodes.append(
-            DAGNode(
-                id=reader_id,
-                agent_factory=reader_factory(),
-                depends_on=[searcher_id],
-                transform=lambda upstream, sid=searcher_id: upstream[sid],
-                label=f"Read sources for Q{i + 1}",
-                agent_type="reader",
-            )
-        )
-
-    # Synthesizer node: depends on ALL readers
+    # Synthesizer: depends on ALL web agents
     nodes.append(
         DAGNode(
             id="synthesizer",
             agent_factory=synthesizer_factory(),
-            depends_on=reader_ids,
-            transform=_merge_reader_outputs,
+            depends_on=agent_ids,
+            transform=_merge_web_agent_outputs,
             label="Synthesize findings",
             agent_type="synthesizer",
         )
     )
 
-    # Distiller node: conditional (skipped for simple queries via MoE)
+    # Distiller: conditional (skipped for simple queries via MoE)
     if include_distiller and distiller_factory is not None:
         nodes.append(
             DAGNode(
@@ -115,7 +103,7 @@ def build_research_dag(
         critic_depends = ["synthesizer"]
         critic_transform = lambda upstream: upstream["synthesizer"]
 
-    # Critic node
+    # Critic
     nodes.append(
         DAGNode(
             id="critic",
@@ -130,23 +118,19 @@ def build_research_dag(
     return nodes
 
 
-def _merge_reader_outputs(upstream: dict[str, Any]) -> Msg:
-    """Merge all reader outputs into a single context message for the synthesizer."""
+def _merge_web_agent_outputs(upstream: dict[str, Any]) -> Msg:
+    """Merge all web agent outputs into a single context for the synthesizer."""
     sections: list[str] = []
     for node_id, msg in sorted(upstream.items()):
         content = msg.content if hasattr(msg, "content") else str(msg)
-        sections.append(f"## Findings from {node_id}\n\n{content}")
+        sections.append(f"## Research from {node_id}\n\n{content}")
 
     merged = "\n\n---\n\n".join(sections)
-    return Msg(
-        name="reader_aggregate",
-        content=merged,
-        role="assistant",
-    )
+    return Msg(name="web_research_aggregate", content=merged, role="assistant")
 
 
 def _merge_for_critic(upstream: dict[str, Any]) -> Msg:
-    """Combine distilled summary and full synthesis for the critic to review."""
+    """Combine distilled summary and full synthesis for the critic."""
     distilled = upstream.get("distiller")
     synthesized = upstream.get("synthesizer")
 

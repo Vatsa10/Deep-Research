@@ -84,53 +84,74 @@ class TestRouter:
         assert isinstance(config, PipelineConfig)
         assert hasattr(config, "planner_model")
         assert hasattr(config, "searcher_model")
-        assert hasattr(config, "reader_model")
         assert hasattr(config, "synthesizer_model")
         assert hasattr(config, "critic_model")
         assert hasattr(config, "max_iterations")
         assert hasattr(config, "max_sub_questions")
 
 
-class TestDAGBuilderConditional:
-    def test_dag_with_distiller(self):
-        from deep_research.dag.builder import build_research_dag
+class TestDAGBuilderWebAgent:
+    """Tests for the unified WebAgent-based DAG."""
 
-        def dummy_factory(*a, **kw):
+    def _make_factory(self):
+        def factory(*a, **kw):
             def f():
                 async def agent(msg=None):
                     pass
                 return agent
             return f
+        return factory
 
-        plan = {"sub_questions": ["Q1"]}
-        nodes = build_research_dag(
-            plan, dummy_factory, dummy_factory, dummy_factory,
-            dummy_factory, dummy_factory, include_distiller=True,
-        )
+    def test_dag_creates_web_agent_nodes(self):
+        from deep_research.dag.builder import build_research_dag
+
+        f = self._make_factory()
+        plan = {"sub_questions": ["Q1", "Q2", "Q3"]}
+        nodes = build_research_dag(plan, f, f, f, f, include_distiller=True)
+
         ids = {n.id for n in nodes}
+        assert "web_agent_0" in ids
+        assert "web_agent_1" in ids
+        assert "web_agent_2" in ids
+        assert "synthesizer" in ids
         assert "distiller" in ids
         assert "critic" in ids
+        # No separate searcher/reader nodes
+        assert not any("searcher" in nid for nid in ids)
+        assert not any("reader" in nid for nid in ids)
+
+    def test_dag_web_agents_are_parallel(self):
+        from deep_research.dag.builder import build_research_dag
+
+        f = self._make_factory()
+        plan = {"sub_questions": ["Q1", "Q2"]}
+        nodes = build_research_dag(plan, f, f, f, f, include_distiller=True)
+
+        # All web agents depend on planner (parallel)
+        for n in nodes:
+            if n.id.startswith("web_agent"):
+                assert n.depends_on == ["planner"]
 
     def test_dag_without_distiller(self):
         from deep_research.dag.builder import build_research_dag
 
-        def dummy_factory(*a, **kw):
-            def f():
-                async def agent(msg=None):
-                    pass
-                return agent
-            return f
-
+        f = self._make_factory()
         plan = {"sub_questions": ["Q1"]}
-        nodes = build_research_dag(
-            plan, dummy_factory, dummy_factory, dummy_factory,
-            None, dummy_factory, include_distiller=False,
-        )
+        nodes = build_research_dag(plan, f, f, None, f, include_distiller=False)
+
         ids = {n.id for n in nodes}
         assert "distiller" not in ids
         assert "critic" in ids
 
-        # Critic should depend on synthesizer directly
         critic = next(n for n in nodes if n.id == "critic")
         assert "synthesizer" in critic.depends_on
-        assert "distiller" not in critic.depends_on
+
+    def test_dag_synthesizer_depends_on_all_web_agents(self):
+        from deep_research.dag.builder import build_research_dag
+
+        f = self._make_factory()
+        plan = {"sub_questions": ["Q1", "Q2", "Q3"]}
+        nodes = build_research_dag(plan, f, f, f, f, include_distiller=True)
+
+        synth = next(n for n in nodes if n.id == "synthesizer")
+        assert set(synth.depends_on) == {"web_agent_0", "web_agent_1", "web_agent_2"}

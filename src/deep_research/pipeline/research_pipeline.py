@@ -10,8 +10,7 @@ from agentscope.model import OpenAIChatModel
 
 from ..agents.validator import PremiseValidatorAgent
 from ..agents.planner import PlannerAgent
-from ..agents.searcher import create_searcher_factory
-from ..agents.reader import create_reader_factory
+from ..agents.web_agent import create_web_agent_factory
 from ..agents.synthesizer import create_synthesizer_factory
 from ..agents.distiller import create_distiller_factory
 from ..agents.critic import create_critic_factory
@@ -66,13 +65,11 @@ async def run_research(
 
     # ── MoE Step 3: Create models based on route ────────────────────
     planner_model = create_model(MODEL_TIERS[route.planner_model])
-    searcher_model = create_model(MODEL_TIERS[route.searcher_model])
-    reader_model = create_model(MODEL_TIERS[route.reader_model])
+    web_agent_model = create_model(MODEL_TIERS[route.searcher_model])  # web agent uses searcher tier
     synthesizer_model = create_model(MODEL_TIERS[route.synthesizer_model])
     critic_model = create_model(MODEL_TIERS[route.critic_model])
 
-    searcher_factory = create_searcher_factory(searcher_model)
-    reader_factory = create_reader_factory(reader_model)
+    web_agent_factory = create_web_agent_factory(web_agent_model)
     synthesizer_factory = create_synthesizer_factory(synthesizer_model)
     distiller_factory = (
         create_distiller_factory(create_model(MODEL_TIERS[route.distiller_model]))
@@ -201,8 +198,7 @@ async def run_research(
         # ── Build and Execute DAG ──
         dag_nodes = build_research_dag(
             plan=plan,
-            searcher_factory=searcher_factory,
-            reader_factory=reader_factory,
+            web_agent_factory=web_agent_factory,
             synthesizer_factory=synthesizer_factory,
             distiller_factory=distiller_factory,
             critic_factory=critic_factory,
