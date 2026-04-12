@@ -1,174 +1,217 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useAuth } from "./hooks/useAuth";
 import { useResearch } from "./hooks/useResearch";
 import AuthModal from "./components/AuthModal";
-import UserMenu from "./components/UserMenu";
-import QueryInput from "./components/QueryInput";
-import TemplateSelector from "./components/TemplateSelector";
-import DAGView from "./components/DAGView";
-import ReportView from "./components/ReportView";
-import ReasoningView from "./components/ReasoningView";
+import Sidebar from "./components/Sidebar";
+import WelcomeScreen from "./components/WelcomeScreen";
+import ChatInput from "./components/ChatInput";
+import MessageBubble from "./components/MessageBubble";
+import DAGInline from "./components/DAGInline";
+import ReasoningPanel from "./components/ReasoningPanel";
 import ShareModal from "./components/ShareModal";
-import FollowUpChat from "./components/FollowUpChat";
-import HistoryList from "./components/HistoryList";
 import SharedView from "./pages/SharedView";
 
-type Page = "research" | "history";
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
 
 export default function App() {
-  // Check if viewing a shared research link
+  // Handle /shared/:token routes
   const path = window.location.pathname;
   const sharedMatch = path.match(/^\/shared\/(.+)$/);
-  if (sharedMatch) {
-    return <SharedView token={sharedMatch[1]} />;
-  }
+  if (sharedMatch) return <SharedView token={sharedMatch[1]} />;
 
   return <MainApp />;
 }
 
 function MainApp() {
   const auth = useAuth();
-  const { state, startResearch, exportResearch, loadSession } = useResearch();
-  const [page, setPage] = useState<Page>("research");
-  const [showShare, setShowShare] = useState(false);
+  const research = useResearch();
+  const { state } = research;
 
-  // Show auth modal if not logged in
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [showShare, setShowShare] = useState(false);
+  const [sidebarRefresh, setSidebarRefresh] = useState(0);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, state.report, state.events.length]);
+
+  // When research completes, add assistant message
+  useEffect(() => {
+    if (state.status === "completed" && state.report) {
+      setMessages((prev) => {
+        // Don't duplicate if already added
+        if (prev.length > 0 && prev[prev.length - 1].content === state.report) return prev;
+        return [...prev, { role: "assistant", content: state.report! }];
+      });
+      setSidebarRefresh((n) => n + 1);
+    }
+  }, [state.status, state.report]);
+
   if (auth.isLoading) {
     return (
-      <div className="app">
-        <div className="dag-loading">Loading</div>
+      <div className="auth-overlay">
+        <div className="loading-dots"><span /><span /><span /></div>
       </div>
     );
   }
 
   if (!auth.isAuthenticated) {
-    return (
-      <div className="app">
-        <header className="header">
-          <h1>
-            <span>Deep Research</span>
-          </h1>
-          <p className="subtitle">
-            Multi-agent research with source credibility, fact-checking, and
-            transparent reasoning
-          </p>
-        </header>
-        <AuthModal onLogin={auth.login} onRegister={auth.register} />
-      </div>
-    );
+    return <AuthModal onLogin={auth.login} onRegister={auth.register} />;
   }
 
-  const handleHistorySelect = (sessionId: string) => {
-    loadSession(sessionId);
-    setPage("research");
+  const handleNewChat = () => {
+    setMessages([]);
+    setActiveSessionId(null);
+    research.reset();
   };
 
-  const handleFollowUp = (newSessionId: string) => {
-    loadSession(newSessionId);
+  const handleSend = (query: string, depth: string) => {
+    setMessages((prev) => [...prev, { role: "user", content: query }]);
+
+    if (activeSessionId && state.status === "completed") {
+      // Continued research — enforce Quick/Standard
+      const safeDepth = depth === "deep" ? "standard" : depth;
+      research.continueResearch(activeSessionId, query, safeDepth);
+    } else {
+      research.startResearch(query, depth);
+    }
   };
 
-  const handleTemplateSelect = (query: string, depth: string) => {
-    startResearch(query, depth);
+  // When a new session starts, track it
+  useEffect(() => {
+    if (state.sessionId && state.sessionId !== activeSessionId) {
+      setActiveSessionId(state.sessionId);
+    }
+  }, [state.sessionId]);
+
+  const handleSelectChat = async (sessionId: string) => {
+    setMessages([]);
+    setActiveSessionId(sessionId);
+    research.reset();
+
+    // Load from API
+    const data = await research.loadSession(sessionId);
+    if (data) {
+      setMessages([
+        { role: "user", content: data.query },
+        ...(data.report ? [{ role: "assistant" as const, content: data.report }] : []),
+      ]);
+    }
   };
+
+  const isNewChat = messages.length === 0 && state.status === "idle";
+  const isRunning = state.status === "running";
 
   return (
-    <div className="app">
-      <header className="header">
-        <div className="header-row">
-          <h1>
-            <span>Deep Research</span>
-          </h1>
-          <UserMenu
-            name={auth.user?.name || ""}
-            email={auth.user?.email || ""}
-            onLogout={auth.logout}
-            onHistory={() => setPage("history")}
-          />
+    <div className="app-layout">
+      <Sidebar
+        activeId={activeSessionId}
+        onSelect={handleSelectChat}
+        onNewChat={handleNewChat}
+        user={auth.user}
+        onLogout={auth.logout}
+        refreshKey={sidebarRefresh}
+      />
+
+      <div className="chat-area">
+        {/* Header */}
+        <div className="chat-header">
+          <div className="chat-title">
+            {isNewChat ? "New Research" : (messages[0]?.content.slice(0, 60) || "Research")}
+          </div>
+          {activeSessionId && state.status === "completed" && (
+            <div className="chat-actions">
+              <button
+                className="chat-action-btn"
+                onClick={() => setShowShare(true)}
+                type="button"
+              >
+                Share
+              </button>
+              <button
+                className="chat-action-btn"
+                onClick={() => research.exportResearch()}
+                type="button"
+              >
+                Export
+              </button>
+            </div>
+          )}
         </div>
-        <p className="subtitle">
-          Multi-agent research with source credibility, fact-checking, and
-          transparent reasoning
-        </p>
-      </header>
 
-      <main>
-        {page === "history" ? (
-          <HistoryList
-            onSelect={handleHistorySelect}
-            onBack={() => setPage("research")}
-          />
+        {/* Messages or Welcome */}
+        {isNewChat ? (
+          <WelcomeScreen onStartResearch={handleSend} />
         ) : (
-          <>
-            <TemplateSelector onSelect={handleTemplateSelect} />
+          <div className="chat-messages">
+            {messages.map((msg, i) => (
+              <MessageBubble key={i} role={msg.role} content={msg.content} />
+            ))}
 
-            <QueryInput
-              onSubmit={startResearch}
-              isLoading={state.status === "running"}
-            />
-
-            {state.status !== "idle" && (
-              <div className="results">
-                {state.error && (
-                  <div className="error-banner">{state.error}</div>
-                )}
-
-                <DAGView
-                  dagStructure={state.dagStructure}
-                  nodeStatuses={state.nodeStatuses}
-                  iteration={state.iteration}
-                  maxIterations={state.maxIterations}
-                  events={state.events}
-                />
-
-                {state.report && (
-                  <>
-                    <ReportView report={state.report} />
-
-                    <ReasoningView
-                      validation={state.validation}
-                      factCheck={state.factCheck}
-                      reasoningTrace={state.reasoningTrace}
-                    />
-
-                    {state.status === "completed" && state.sessionId && (
-                      <>
-                        <FollowUpChat
-                          sessionId={state.sessionId}
-                          onNewResearch={handleFollowUp}
-                        />
-
-                        <div className="export-bar">
-                          <button
-                            className="export-btn"
-                            onClick={() => setShowShare(true)}
-                            type="button"
-                          >
-                            Share
-                          </button>
-                          <button
-                            className="export-btn"
-                            onClick={exportResearch}
-                            type="button"
-                          >
-                            Export JSON
-                          </button>
-                        </div>
-
-                        {showShare && (
-                          <ShareModal
-                            sessionId={state.sessionId}
-                            onClose={() => setShowShare(false)}
-                          />
-                        )}
-                      </>
-                    )}
-                  </>
-                )}
+            {/* Show DAG while running */}
+            {isRunning && (
+              <div className="message message-assistant">
+                <div className="message-label">Deep Research</div>
+                <div className="message-content">
+                  <DAGInline
+                    dagStructure={state.dagStructure}
+                    nodeStatuses={state.nodeStatuses}
+                    iteration={state.iteration}
+                    maxIterations={state.maxIterations}
+                    events={state.events}
+                  />
+                  <div className="loading-dots"><span /><span /><span /></div>
+                </div>
               </div>
             )}
-          </>
+
+            {/* Error */}
+            {state.error && <div className="error-banner">{state.error}</div>}
+
+            {/* Reasoning panel after completion */}
+            {state.status === "completed" && (
+              <ReasoningPanel
+                validation={state.validation}
+                factCheck={state.factCheck}
+                reasoningTrace={state.reasoningTrace}
+              />
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
         )}
-      </main>
+
+        {/* Input bar — always visible unless on welcome screen */}
+        {!isNewChat && (
+          <ChatInput
+            onSend={handleSend}
+            isLoading={isRunning}
+            isContinued={state.status === "completed"}
+          />
+        )}
+
+        {/* Welcome screen has its own input area via templates */}
+        {isNewChat && (
+          <ChatInput
+            onSend={handleSend}
+            isLoading={false}
+          />
+        )}
+
+        {/* Share modal */}
+        {showShare && activeSessionId && (
+          <ShareModal
+            sessionId={activeSessionId}
+            onClose={() => setShowShare(false)}
+          />
+        )}
+      </div>
     </div>
   );
 }
