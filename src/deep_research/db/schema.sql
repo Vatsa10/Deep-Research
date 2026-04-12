@@ -53,7 +53,18 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS memory_buffer (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    summary TEXT NOT NULL,
+    domain TEXT DEFAULT 'general',
+    query_type TEXT DEFAULT 'exploratory',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_shares_session ON share_links(session_id);
 CREATE INDEX IF NOT EXISTS idx_templates_user ON templates(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_user ON memory_buffer(user_id);

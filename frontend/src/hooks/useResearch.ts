@@ -38,7 +38,7 @@ interface ResearchState {
   }[];
 }
 
-const INITIAL_STATE: ResearchState = {
+const INITIAL: ResearchState = {
   status: "idle",
   sessionId: null,
   dagStructure: null,
@@ -55,34 +55,66 @@ const INITIAL_STATE: ResearchState = {
 };
 
 export function useResearch() {
-  const [state, setState] = useState<ResearchState>(INITIAL_STATE);
+  const [state, setState] = useState<ResearchState>(INITIAL);
 
-  const startResearch = useCallback(
-    async (query: string, depth: string) => {
-      setState({ ...INITIAL_STATE, status: "running" });
+  const reset = useCallback(() => setState(INITIAL), []);
+
+  const startResearch = useCallback(async (query: string, depth: string) => {
+    setState({ ...INITIAL, status: "running" });
+
+    try {
+      const res = await fetch("/api/research", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ query, depth }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || res.statusText);
+      }
+
+      const { session_id } = await res.json();
+      setState((p) => ({ ...p, sessionId: session_id }));
+      connectSSE(session_id, setState);
+    } catch (err) {
+      setState((p) => ({
+        ...p,
+        status: "error",
+        error: err instanceof Error ? err.message : "Unknown error",
+      }));
+    }
+  }, []);
+
+  const continueResearch = useCallback(
+    async (sessionId: string, query: string, depth: string) => {
+      setState((p) => ({
+        ...p,
+        status: "running",
+        dagStructure: null,
+        nodeStatuses: {},
+        events: [],
+        error: null,
+      }));
 
       try {
-        const res = await fetch("/api/research", {
+        const res = await fetch(`/api/research/${sessionId}/continue`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...getAuthHeaders(),
-          },
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
           body: JSON.stringify({ query, depth }),
         });
 
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || `Failed: ${res.statusText}`);
+          throw new Error(err.detail || res.statusText);
         }
 
         const { session_id } = await res.json();
-        setState((prev) => ({ ...prev, sessionId: session_id }));
-
+        setState((p) => ({ ...p, sessionId: session_id }));
         connectSSE(session_id, setState);
       } catch (err) {
-        setState((prev) => ({
-          ...prev,
+        setState((p) => ({
+          ...p,
           status: "error",
           error: err instanceof Error ? err.message : "Unknown error",
         }));
@@ -91,11 +123,39 @@ export function useResearch() {
     []
   );
 
+  const loadSession = useCallback(
+    async (sessionId: string): Promise<{ query: string; report: string } | null> => {
+      try {
+        const res = await fetch(`/api/research/${sessionId}`, {
+          headers: getAuthHeaders(),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+
+        setState({
+          ...INITIAL,
+          status: data.status === "completed" ? "completed" : "error",
+          sessionId,
+          report: data.report || null,
+          distilled: data.distilled_summary || null,
+          validation: data.validation || null,
+          factCheck: data.fact_check || null,
+          reasoningTrace: data.reasoning_trace || [],
+        });
+
+        return { query: data.query, report: data.report || "" };
+      } catch {
+        return null;
+      }
+    },
+    []
+  );
+
   const exportResearch = useCallback(async () => {
     if (!state.sessionId) return;
-    const headers = getAuthHeaders();
-    const url = `/api/research/${state.sessionId}/export`;
-    const res = await fetch(url, { headers });
+    const res = await fetch(`/api/research/${state.sessionId}/export`, {
+      headers: getAuthHeaders(),
+    });
     if (res.ok) {
       const blob = await res.blob();
       const a = document.createElement("a");
@@ -105,106 +165,73 @@ export function useResearch() {
     }
   }, [state.sessionId]);
 
-  const loadSession = useCallback(async (sessionId: string) => {
-    try {
-      const res = await fetch(`/api/research/${sessionId}`, {
-        headers: getAuthHeaders(),
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      setState({
-        ...INITIAL_STATE,
-        status: data.status === "completed" ? "completed" : "error",
-        sessionId,
-        report: data.report || null,
-        distilled: data.distilled_summary || null,
-        validation: data.validation || null,
-        factCheck: data.fact_check || null,
-        reasoningTrace: data.reasoning_trace || [],
-      });
-    } catch {}
-  }, []);
-
-  return { state, startResearch, exportResearch, loadSession };
+  return { state, startResearch, continueResearch, loadSession, exportResearch, reset };
 }
 
 function connectSSE(
   sessionId: string,
   setState: React.Dispatch<React.SetStateAction<ResearchState>>
 ) {
-  const evtSource = new EventSource(`/api/research/${sessionId}/stream`);
+  const src = new EventSource(`/api/research/${sessionId}/stream`);
 
-  evtSource.onmessage = (event) => {
+  src.onmessage = (event) => {
     const data: SSEEvent = JSON.parse(event.data);
 
     setState((prev) => {
-      const newState = { ...prev };
-      newState.events = [...prev.events, data];
+      const s = { ...prev, events: [...prev.events, data] };
 
       switch (data.type) {
         case "dag_init":
-          newState.dagStructure = data.structure as DAGStructure;
-          newState.iteration = (data.iteration as number) || 1;
-          newState.nodeStatuses = {};
+          s.dagStructure = data.structure as DAGStructure;
+          s.iteration = (data.iteration as number) || 1;
+          s.nodeStatuses = {};
           break;
         case "node_running":
-          newState.nodeStatuses = {
-            ...prev.nodeStatuses,
-            [data.node_id as string]: "running",
-          };
+          s.nodeStatuses = { ...prev.nodeStatuses, [data.node_id as string]: "running" };
           break;
         case "node_completed":
-          newState.nodeStatuses = {
-            ...prev.nodeStatuses,
-            [data.node_id as string]: "completed",
-          };
+          s.nodeStatuses = { ...prev.nodeStatuses, [data.node_id as string]: "completed" };
           break;
         case "node_failed":
-          newState.nodeStatuses = {
-            ...prev.nodeStatuses,
-            [data.node_id as string]: "failed",
-          };
+          s.nodeStatuses = { ...prev.nodeStatuses, [data.node_id as string]: "failed" };
           break;
         case "iteration_start":
-          newState.iteration = (data.iteration as number) || 1;
-          newState.maxIterations = (data.max as number) || 3;
+          s.iteration = (data.iteration as number) || 1;
+          s.maxIterations = (data.max as number) || 3;
           break;
         case "validation":
-          newState.validation = data as Record<string, unknown>;
+          s.validation = data as Record<string, unknown>;
           break;
         case "fact_check":
-          newState.factCheck = {
+          s.factCheck = {
             total: (data.total as number) || 0,
             verified: (data.verified as number) || 0,
             dead: (data.dead as number) || 0,
           };
           break;
         case "done":
-          newState.status = "completed";
-          newState.report = (data.report as string) || null;
-          newState.distilled = (data.distilled as string) || null;
+          s.status = "completed";
+          s.report = (data.report as string) || null;
+          s.distilled = (data.distilled as string) || null;
           fetchTrace(sessionId, setState);
           break;
         case "error":
-          newState.status = "error";
-          newState.error = (data.message as string) || "Unknown error";
+          s.status = "error";
+          s.error = (data.message as string) || "Unknown error";
           break;
       }
-
-      return newState;
+      return s;
     });
 
-    if (data.type === "done" || data.type === "error") {
-      evtSource.close();
-    }
+    if (data.type === "done" || data.type === "error") src.close();
   };
 
-  evtSource.onerror = () => {
-    evtSource.close();
-    setState((prev) => ({
-      ...prev,
-      status: prev.status === "completed" ? "completed" : "error",
-      error: prev.status === "completed" ? null : "Lost connection to server",
+  src.onerror = () => {
+    src.close();
+    setState((p) => ({
+      ...p,
+      status: p.status === "completed" ? "completed" : "error",
+      error: p.status === "completed" ? null : "Lost connection",
     }));
   };
 }
@@ -217,20 +244,15 @@ async function fetchTrace(
     const res = await fetch(`/api/research/${sessionId}/trace`, {
       headers: getAuthHeaders(),
     });
-    if (res.ok) {
-      const data = await res.json();
-      setState((prev) => ({
-        ...prev,
-        validation: data.validation || prev.validation,
-        reasoningTrace: data.reasoning_trace || [],
-        factCheck: data.fact_check
-          ? {
-              total: data.fact_check.total || 0,
-              verified: data.fact_check.verified || 0,
-              dead: data.fact_check.dead || 0,
-            }
-          : prev.factCheck,
-      }));
-    }
+    if (!res.ok) return;
+    const data = await res.json();
+    setState((p) => ({
+      ...p,
+      validation: data.validation || p.validation,
+      reasoningTrace: data.reasoning_trace || [],
+      factCheck: data.fact_check
+        ? { total: data.fact_check.total || 0, verified: data.fact_check.verified || 0, dead: data.fact_check.dead || 0 }
+        : p.factCheck,
+    }));
   } catch {}
 }

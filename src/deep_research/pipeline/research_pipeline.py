@@ -49,15 +49,18 @@ async def run_research(
     query: str,
     depth: str = "standard",
     on_progress: Callable[..., Any] | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute the full research pipeline with all deficiency fixes.
 
     Pipeline stages:
+    0. Retrieve memory context (Qdrant + Turso buffer)
     1. Premise validation (reject nonsense, classify query)
     2. Intent-aware planning (deep decomposition)
     3. DAG execution (parallel search → read → synthesize → distill → critique)
     4. Fact-checking (citation verification, unsupported claim detection)
     5. Iteration loop (critic-driven refinement)
+    6. Store results in memory (Qdrant + Turso buffer)
     """
     max_iterations, max_sub_questions, max_urls = DEPTH_PRESETS.get(
         depth, DEPTH_PRESETS["standard"]
@@ -79,6 +82,26 @@ async def run_research(
     async def emit(event_type: str, data: dict) -> None:
         if on_progress:
             await on_progress(event_type, data)
+
+    # ── Stage -1: Retrieve Memory Context ─────────────────────────────
+
+    memory_context = ""
+    if user_id:
+        try:
+            from ..db.memory import build_context_from_memory
+            from ..vector.memory import search_similar_research
+
+            # Turso buffer: recent research summaries
+            memory_context = build_context_from_memory(user_id, limit=5)
+
+            # Qdrant: semantically similar past research
+            similar = await search_similar_research(query, user_id=user_id, top_k=3)
+            if similar:
+                memory_context += "\n\n## Similar Past Research\n"
+                for s in similar:
+                    memory_context += f"- {s['query']}: {s['distilled_summary'][:150]}\n"
+        except Exception:
+            logger.debug("Memory retrieval skipped", exc_info=True)
 
     # ── Stage 0: Premise Validation ──────────────────────────────────
 
@@ -127,6 +150,8 @@ async def run_research(
             plan_input = effective_query
             if premise_warning:
                 plan_input = f"{effective_query}\n\n[VALIDATOR WARNING: {premise_warning}]"
+            if memory_context:
+                plan_input = f"{plan_input}\n\n{memory_context}"
             plan_msg = await planner(Msg(name="user", content=plan_input, role="user"))
         else:
             gap_context = (
