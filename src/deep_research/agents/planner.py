@@ -14,6 +14,24 @@ logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "planner.md"
 
+
+def _extract_text(content: object) -> str:
+    """Extract plain text from a ChatResponse content (list of blocks) or string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+            elif hasattr(block, "text"):
+                parts.append(block.text)
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
+
+
 PLAN_DEFAULTS = {
     "query_type": "exploratory",
     "domain": "general",
@@ -48,7 +66,7 @@ class PlannerAgent(AgentBase):
 
         formatted = await self._formatter.format(messages)
         response = await self.model(formatted)
-        text = response.content if isinstance(response.content, str) else str(response.content)
+        text = _extract_text(response.content)
 
         try:
             if "```json" in text:
