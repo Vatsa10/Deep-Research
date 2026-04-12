@@ -1,9 +1,8 @@
-"""WebAgent: Unified search + read + extract agent.
+"""WebAgent: Autonomous web research agent with full tool access.
 
-Replaces the separate Searcher and Reader agents with a single autonomous
-agent that has access to ALL web tools and decides what to do based on
-the query context. It can search, read pages, fetch PDFs, get YouTube
-transcripts, read GitHub repos — all in one ReAct loop.
+A single agent that searches, reads, follows links, and extracts
+content from any source the query demands. Replaces the old
+separate Searcher + Reader architecture.
 """
 
 from __future__ import annotations
@@ -14,8 +13,8 @@ from agentscope.agent import ReActAgent
 from agentscope.formatter import OpenAIChatFormatter
 from agentscope.tool import Toolkit
 
-from ..tools.web_search import web_search
-from ..tools.web_reader import fetch_url
+from ..tools.web_search import web_search, search_news, quick_answer
+from ..tools.web_reader import fetch_url, crawl_links
 from ..tools.academic_search import academic_search
 
 PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "web_agent.md"
@@ -29,24 +28,27 @@ def create_web_agent(
 ) -> callable:
     """Factory returning a callable that creates a WebAgent.
 
-    The WebAgent autonomously:
-    1. Searches the web (and optionally academic papers)
-    2. Picks the most relevant URLs from results
-    3. Fetches and extracts content from those URLs
-    4. Follows links or searches again if initial results are insufficient
-    5. Returns a structured summary with sources
-
-    Args:
-        sub_question: The research sub-question to investigate.
-        model: The LLM model to use.
-        include_academic: Whether to include academic_search tool.
-        max_iters: Maximum ReAct iterations (search + read cycles).
+    The agent autonomously decides which tools to use based on the
+    sub-question. It has access to:
+    - web_search: general web search
+    - search_news: recent news articles
+    - quick_answer: instant factual lookups
+    - fetch_url: read any URL (web, PDF, YouTube, GitHub, etc.)
+    - crawl_links: discover related pages within a site
+    - academic_search: 200M+ academic papers (when enabled)
     """
 
     def factory() -> ReActAgent:
         toolkit = Toolkit()
+
+        # Core tools — always available
         toolkit.register_tool_function(web_search)
         toolkit.register_tool_function(fetch_url)
+        toolkit.register_tool_function(search_news)
+        toolkit.register_tool_function(quick_answer)
+        toolkit.register_tool_function(crawl_links)
+
+        # Academic search — only when the sub-question needs it
         if include_academic:
             toolkit.register_tool_function(academic_search)
 
@@ -56,8 +58,7 @@ def create_web_agent(
         if include_academic:
             sys_prompt += (
                 "\n\n**Note:** This sub-question benefits from academic sources. "
-                "Use `academic_search` to find papers, then `fetch_url` to read "
-                "the most relevant ones."
+                "Consider using `academic_search` alongside `web_search`."
             )
 
         agent = ReActAgent(
@@ -74,13 +75,7 @@ def create_web_agent(
 
 
 def create_web_agent_factory(model: object) -> callable:
-    """Returns a function that creates web agent factories for the DAG builder.
-
-    Usage:
-        factory_fn = create_web_agent_factory(model)
-        agent_factory = factory_fn("What is quantum computing?", needs_academic=True)
-        agent = agent_factory()  # creates the actual agent
-    """
+    """Returns a function that creates web agent factories for the DAG builder."""
 
     def make_factory(sub_question: str, needs_academic: bool = False) -> callable:
         return create_web_agent(sub_question, model, include_academic=needs_academic)
