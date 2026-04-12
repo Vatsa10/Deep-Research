@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from typing import Any, Callable
 
 from agentscope.message import Msg
@@ -24,20 +22,8 @@ from ..tools.fact_checker import verify_all_citations
 
 logger = logging.getLogger(__name__)
 
-DEPTH_PRESETS = {
-    "quick": (1, 3, 3),
-    "standard": (2, 5, 5),
-    "deep": (3, 7, 8),
-}
-
-
-def load_model_config() -> dict:
-    config_path = Path(__file__).parent.parent.parent.parent / "config" / "model_config.json"
-    with open(config_path, encoding="utf-8") as f:
-        return json.load(f)
-
-
 def create_model(config: dict) -> OpenAIChatModel:
+    """Create a model from a tier config dict (e.g., MODEL_TIERS["mini"])."""
     return OpenAIChatModel(
         model_name=config["model_name"],
         stream=False,
@@ -51,33 +37,51 @@ async def run_research(
     on_progress: Callable[..., Any] | None = None,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Execute the full research pipeline with all deficiency fixes.
+    """Execute the full research pipeline with MoE (Mixture of Experts) routing.
 
     Pipeline stages:
-    0. Retrieve memory context (Qdrant + Turso buffer)
-    1. Premise validation (reject nonsense, classify query)
-    2. Intent-aware planning (deep decomposition)
-    3. DAG execution (parallel search → read → synthesize → distill → critique)
-    4. Fact-checking (citation verification, unsupported claim detection)
-    5. Iteration loop (critic-driven refinement)
-    6. Store results in memory (Qdrant + Turso buffer)
+    0. Classify query complexity (single cheap LLM call)
+    1. Route to appropriate models (simple/moderate/complex)
+    2. Retrieve memory context (Qdrant + Turso buffer)
+    3. Premise validation (skipped for simple queries)
+    4. Intent-aware planning
+    5. DAG execution (parallel search → read → synthesize → [distill] → critique)
+    6. Fact-checking (citation verification)
+    7. Iteration loop (critic-driven, capped by MoE)
+    8. Store results in memory
     """
-    max_iterations, max_sub_questions, max_urls = DEPTH_PRESETS.get(
-        depth, DEPTH_PRESETS["standard"]
-    )
+    from ..moe.classifier import classify_query
+    from ..moe.router import get_pipeline_config, MODEL_TIERS
 
-    model_config = load_model_config()
-    planner_model = create_model(model_config["planner"])
-    searcher_model = create_model(model_config["searcher"])
-    reader_model = create_model(model_config["reader"])
-    synthesizer_model = create_model(model_config["synthesizer"])
-    critic_model = create_model(model_config["critic"])
+    # ── MoE Step 1: Classify query complexity ───────────────────────
+    router_model = create_model(MODEL_TIERS["mini"])
+    classification = await classify_query(query, router_model)
+
+    # ── MoE Step 2: Get routing config ──────────────────────────────
+    route = get_pipeline_config(classification, depth_override=depth)
+
+    max_iterations = route.max_iterations
+    max_sub_questions = route.max_sub_questions
+    max_urls = route.max_sub_questions  # same as sub-questions
+
+    # ── MoE Step 3: Create models based on route ────────────────────
+    planner_model = create_model(MODEL_TIERS[route.planner_model])
+    searcher_model = create_model(MODEL_TIERS[route.searcher_model])
+    reader_model = create_model(MODEL_TIERS[route.reader_model])
+    synthesizer_model = create_model(MODEL_TIERS[route.synthesizer_model])
+    critic_model = create_model(MODEL_TIERS[route.critic_model])
 
     searcher_factory = create_searcher_factory(searcher_model)
     reader_factory = create_reader_factory(reader_model)
     synthesizer_factory = create_synthesizer_factory(synthesizer_model)
-    distiller_factory = create_distiller_factory(synthesizer_model)
+    distiller_factory = (
+        create_distiller_factory(create_model(MODEL_TIERS[route.distiller_model]))
+        if route.distiller_model
+        else None
+    )
     critic_factory = create_critic_factory(critic_model)
+
+    include_distiller = route.distiller_model is not None
 
     async def emit(event_type: str, data: dict) -> None:
         if on_progress:
@@ -103,13 +107,29 @@ async def run_research(
         except Exception:
             logger.debug("Memory retrieval skipped", exc_info=True)
 
-    # ── Stage 0: Premise Validation ──────────────────────────────────
+    # ── Stage 0: Premise Validation (skipped for simple queries) ────
 
-    await emit("status", {"agent": "Validator", "message": "Checking query premise..."})
+    await emit("status", {
+        "agent": "MoE Router",
+        "message": f"Classified as {route.complexity} ({route.domain})"
+            + (", skipping validator" if not route.validator_model else "")
+            + (", skipping distiller" if not route.distiller_model else ""),
+    })
 
-    validator = PremiseValidatorAgent(model=planner_model)
-    validation_msg = await validator(Msg(name="user", content=query, role="user"))
-    validation = validation_msg.metadata.get("validation", {})
+    if route.validator_model:
+        await emit("status", {"agent": "Validator", "message": "Checking query premise..."})
+        validator_model_inst = create_model(MODEL_TIERS[route.validator_model])
+        validator = PremiseValidatorAgent(model=validator_model_inst)
+        validation_msg = await validator(Msg(name="user", content=query, role="user"))
+        validation = validation_msg.metadata.get("validation", {})
+    else:
+        validation = {
+            "is_valid": True,
+            "query_type": classification.get("domain", "general"),
+            "concerns": [],
+            "rewritten_query": None,
+            "warning": "",
+        }
 
     premise_warning = ""
     effective_query = query
@@ -186,6 +206,7 @@ async def run_research(
             synthesizer_factory=synthesizer_factory,
             distiller_factory=distiller_factory,
             critic_factory=critic_factory,
+            include_distiller=include_distiller,
         )
 
         dag_structure = get_dag_structure(dag_nodes)

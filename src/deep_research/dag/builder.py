@@ -14,8 +14,9 @@ def build_research_dag(
     searcher_factory: Any,
     reader_factory: Any,
     synthesizer_factory: Any,
-    distiller_factory: Any,
+    distiller_factory: Any | None,
     critic_factory: Any,
+    include_distiller: bool = True,
 ) -> list[DAGNode]:
     """Construct a DAG of agent nodes from a research plan.
 
@@ -96,25 +97,31 @@ def build_research_dag(
         )
     )
 
-    # Distiller node: depends on synthesizer
-    nodes.append(
-        DAGNode(
-            id="distiller",
-            agent_factory=distiller_factory(),
-            depends_on=["synthesizer"],
-            transform=lambda upstream: upstream["synthesizer"],
-            label="Distill insights",
-            agent_type="distiller",
+    # Distiller node: conditional (skipped for simple queries via MoE)
+    if include_distiller and distiller_factory is not None:
+        nodes.append(
+            DAGNode(
+                id="distiller",
+                agent_factory=distiller_factory(),
+                depends_on=["synthesizer"],
+                transform=lambda upstream: upstream["synthesizer"],
+                label="Distill insights",
+                agent_type="distiller",
+            )
         )
-    )
+        critic_depends = ["distiller", "synthesizer"]
+        critic_transform = _merge_for_critic
+    else:
+        critic_depends = ["synthesizer"]
+        critic_transform = lambda upstream: upstream["synthesizer"]
 
-    # Critic node: depends on distiller (reviews the distilled + full report)
+    # Critic node
     nodes.append(
         DAGNode(
             id="critic",
             agent_factory=critic_factory(),
-            depends_on=["distiller", "synthesizer"],
-            transform=_merge_for_critic,
+            depends_on=critic_depends,
+            transform=critic_transform,
             label="Review & fact-check",
             agent_type="critic",
         )
