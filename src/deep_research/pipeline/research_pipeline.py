@@ -265,6 +265,23 @@ async def run_research(
         else:
             break
 
+    # ── Store in Memory ──
+    if user_id and distilled_summary:
+        try:
+            from ..db.memory import store_memory, prune_old_memories
+
+            plan_data = plan_msg.metadata.get("plan", {}) if plan_msg else {}
+            store_memory(
+                user_id=user_id,
+                session_id=state_session_id if 'state_session_id' in dir() else "",
+                summary=distilled_summary[:500],
+                domain=plan_data.get("domain", "general"),
+                query_type=plan_data.get("query_type", "exploratory"),
+            )
+            prune_old_memories(user_id, keep=50)
+        except Exception:
+            logger.debug("Memory storage skipped", exc_info=True)
+
     # ── Final Output ──
     await emit("done", {
         "report": final_report,

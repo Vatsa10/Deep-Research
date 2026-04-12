@@ -76,6 +76,7 @@ async def _run_research_task(
             query=query,
             depth=depth,
             on_progress=on_progress,
+            user_id=user_id,
         )
 
         # Persist to Turso
@@ -228,7 +229,10 @@ async def continue_research(
     req: ResearchRequest,
     user: dict = Depends(get_current_user),
 ) -> ResearchStartResponse:
-    """Continue a previous research session with a follow-up question."""
+    """Continue a previous research session with a follow-up question.
+
+    Enforces Quick or Standard depth only — Deep is too heavy for follow-ups.
+    """
     original = get_session(session_id)
     if not original:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -236,6 +240,9 @@ async def continue_research(
         raise HTTPException(status_code=403, detail="Not your session")
     if original["status"] != "completed":
         raise HTTPException(status_code=400, detail="Original research not yet complete")
+
+    # Enforce Quick/Standard for continued responses
+    safe_depth = req.depth if req.depth in ("quick", "standard") else "standard"
 
     # Build enriched query with previous context
     enriched_query = (
@@ -251,12 +258,12 @@ async def continue_research(
         session_id=new_session_id,
         user_id=user["id"],
         query=req.query,
-        depth=req.depth,
+        depth=safe_depth,
         continued_from=session_id,
     )
 
     asyncio.create_task(
-        _run_research_task(new_session_id, user["id"], enriched_query, req.depth)
+        _run_research_task(new_session_id, user["id"], enriched_query, safe_depth)
     )
 
     return ResearchStartResponse(session_id=new_session_id)
