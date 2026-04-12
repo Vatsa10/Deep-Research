@@ -16,7 +16,7 @@ _executor = ThreadPoolExecutor(max_workers=4)
 
 def _ddg_search(query: str, max_results: int) -> list[dict]:
     """Run DuckDuckGo search synchronously (the library is sync-only)."""
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
 
     results = []
     with DDGS() as ddgs:
@@ -25,7 +25,7 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
                 "title": r.get("title", ""),
                 "url": r.get("href", ""),
                 "content": r.get("body", ""),
-                "score": 0.0,  # DDG doesn't provide relevance scores
+                "score": 0.0,
             })
     return results
 
